@@ -99,6 +99,29 @@ def _result_projection(result):
             "has_audit": _contains_policy(output)}
 
 
+def _valid_mcp_health(row):
+    """Recognize bounded native health metadata without granting task evidence."""
+    kind = row.get("type")
+    if kind not in ("mcp.server_failed", "mcp.server_failure_resolved"):
+        return False
+    required = {"type", "agentId", "serverName", "transport", "time"}
+    allowed = required | ({"error"} if kind == "mcp.server_failed" else {"resolution"})
+    if kind == "mcp.server_failure_resolved":
+        required = required | {"resolution"}
+    if not required <= row.keys() or row.keys() - allowed:
+        return False
+    if not all(isinstance(row[key], str) for key in ("agentId", "serverName")):
+        return False
+    if row["transport"] not in ("stdio", "http", "sse"):
+        return False
+    timestamp = row["time"]
+    if type(timestamp) not in (int, float) or not 0 <= timestamp <= 9007199254740991:
+        return False
+    if kind == "mcp.server_failed":
+        return "error" not in row or isinstance(row["error"], str)
+    return row["resolution"] in ("recovered", "needs-auth", "disabled", "removed")
+
+
 def load_log(path):
     """Stream the current native JSONL envelope without retaining private content."""
     path = Path(path)
@@ -130,6 +153,10 @@ def load_log(path):
                 first = False
                 if row.get("protocol_version") != "1.5":
                     trace.issues.append("unsupported_protocol")
+            if kind in ("mcp.server_failed", "mcp.server_failure_resolved"):
+                if not _valid_mcp_health(row):
+                    trace.issues.append("unsupported_envelope")
+                continue
             if kind == "turn.prompt":
                 trace.has_prompt = True
                 trace.ended = False

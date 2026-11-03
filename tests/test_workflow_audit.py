@@ -72,6 +72,77 @@ class AuditTests(unittest.TestCase):
         self.assertTrue(found, f"Missing audit rule: {rule}")
         return found[0]
 
+    def test_valid_mcp_health_metadata_preserves_phase_evidence(self):
+        for transport in ("stdio", "http", "sse"):
+            for resolution in ("recovered", "needs-auth", "disabled", "removed"):
+                for error in (None, "PRIVATE_MCP_ERROR"):
+                    with self.subTest(transport=transport, resolution=resolution, error=error):
+                        failed = {"type": "mcp.server_failed", "agentId": "main",
+                                  "serverName": "owned", "transport": transport, "time": 1700000000000}
+                        if error is not None:
+                            failed["error"] = error
+                        resolved = {"type": "mcp.server_failure_resolved", "agentId": "main",
+                                    "serverName": "owned", "transport": transport,
+                                    "resolution": resolution, "time": 1700000000001}
+                        j = self.complete_reviewer()
+                        j.rows[3:3] = [failed, resolved]
+                        code, report = self.run_audit(j)
+                        self.assertEqual(code, 0)
+                        self.assertEqual(report["formal_status"], "PASS")
+                        self.assertEqual(report["workflow_status"], "NOT_PROVEN")
+                        self.assertNotIn("PRIVATE_MCP_ERROR", json.dumps(report))
+
+    def test_mcp_health_cannot_supply_verification_or_completion(self):
+        event = {"type": "mcp.server_failure_resolved", "agentId": "main",
+                 "serverName": "owned", "transport": "http", "resolution": "recovered",
+                 "time": 1700000000000}
+        j = Journal()
+        for skill in (ENTRY, USING):
+            j.skill(skill)
+        j.rows.append(dict(event))
+        code, report = self.run_audit(j.finish())
+        self.assertEqual(code, 1)
+        self.assertEqual(self.status(report, "verification"), "FAIL")
+        j = Journal()
+        for skill in (ENTRY, USING, VERIFY):
+            j.skill(skill)
+        j.rows.append(dict(event))
+        code, report = self.run_audit(j)
+        self.assertEqual(code, 2)
+        self.assertEqual(report["formal_status"], "UNVERIFIED")
+        j = self.complete_reviewer()
+        j.rows.append(dict(event))
+        self.assertEqual(self.run_audit(j)[0], 0)
+
+    def test_malformed_mcp_health_records_remain_unverified(self):
+        failed = {"type": "mcp.server_failed", "agentId": "main", "serverName": "owned",
+                  "transport": "stdio", "time": 1700000000000}
+        resolved = {**failed, "type": "mcp.server_failure_resolved", "resolution": "recovered"}
+        variants = []
+        for base in (failed, resolved):
+            for key in base:
+                value = dict(base)
+                value.pop(key)
+                variants.append(value)
+            for key, invalid in (("agentId", 1), ("serverName", None), ("transport", "ftp"),
+                                 ("time", True), ("time", None), ("time", "1"),
+                                 ("time", -1), ("time", float("nan")), ("time", float("inf")),
+                                 ("time", 10 ** 400), ("origin", {"kind": "user"}),
+                                 ("turnId", 1), ("content", [])):
+                variants.append({**base, key: invalid})
+        variants.extend([{**failed, "error": {"payload": "PRIVATE_MCP_ERROR"}},
+                         {**failed, "resolution": "recovered"},
+                         {**resolved, "resolution": "healthy"},
+                         {**resolved, "error": "PRIVATE_MCP_ERROR"}])
+        for index, event in enumerate(variants):
+            with self.subTest(index=index):
+                j = self.complete_reviewer()
+                j.rows.insert(3, event)
+                code, report = self.run_audit(j)
+                self.assertEqual(code, 2)
+                self.assertEqual(report["formal_status"], "UNVERIFIED")
+                self.assertNotIn("PRIVATE_MCP_ERROR", json.dumps(report))
+
     def test_complete_reviewer_credits_actual_loads_but_never_proves_workflow(self):
         j = Journal()
         for skill in (ENTRY, USING, VERIFY):
