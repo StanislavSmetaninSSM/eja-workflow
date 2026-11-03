@@ -43,6 +43,7 @@ class Journal:
                   f'Skill "{name}" loaded inline. Follow its instructions.', failed)
 
     def finish(self):
+        self.rows.append({"type": "turn.ended", "turnId": 0, "reason": "completed"})
         self.rows.append({"type": "agent.turn.ended", "outcome": "done"})
         return self
 
@@ -78,6 +79,26 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(report["formal_status"], "PASS")
         self.assertEqual(report["workflow_status"], "NOT_PROVEN")
+
+    def test_actor_end_before_native_stop_is_not_kernel_completion(self):
+        j = Journal()
+        j.rows.append({"type": "turn.prompt", "turnId": 0})
+        for skill in (ENTRY, USING, VERIFY):
+            j.skill(skill)
+        j.rows.append({"type": "agent.turn.ended", "turnId": 0, "outcome": "done"})
+        code, report = self.run_audit(j)
+        self.assertEqual(code, 2)
+        self.assertEqual(report["formal_status"], "UNVERIFIED")
+        j.rows.append({"type": "turn.ended", "turnId": 0, "reason": "completed"})
+        self.assertEqual(self.run_audit(j)[0], 0)
+
+    def test_new_kernel_prompt_cannot_reuse_previous_completion(self):
+        j = self.complete_reviewer()
+        j.rows.extend([{"type": "turn.prompt", "turnId": 1},
+                       {"type": "agent.turn.ended", "turnId": 1, "outcome": "done"}])
+        self.assertEqual(self.run_audit(j)[0], 2)
+        j.rows.append({"type": "turn.ended", "turnId": 0, "reason": "completed"})
+        self.assertEqual(self.run_audit(j)[0], 2)
 
     def test_missing_execution_is_detected_despite_green_self_report(self):
         j = Journal()

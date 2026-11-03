@@ -38,6 +38,17 @@ IGNORED_TYPES = {
 POLICY_PATH = Path(__file__).resolve().parents[1] / "skills/eja-workflow/references/contract-review.md"
 
 
+def canonical_turn_id(value):
+    """Normalize the protocol's numeric prompt id and decimal-string loop id."""
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 9007199254740991:
+        return value
+    if isinstance(value, str) and len(value) <= 16 and re.fullmatch(r"0|[1-9][0-9]*", value):
+        parsed = int(value)
+        if parsed <= 9007199254740991:
+            return parsed
+    raise ValueError("unsupported_turn_id")
+
+
 def _policy():
     try:
         return POLICY_PATH.read_text(encoding="utf-8").strip()
@@ -62,11 +73,13 @@ class Trace:
     has_metadata: bool = False
     has_prompt: bool = False
     ended: bool = False
+    kernel_ended: bool = False
+    kernel_turn_id: int | None = None
 
     @property
     def complete(self):
         """Whether the supported record stream has start/end and no parse gaps."""
-        return self.has_metadata and self.has_prompt and self.ended and not self.issues
+        return self.has_metadata and self.has_prompt and self.ended and self.kernel_ended and not self.issues
 
 
 def _result_projection(result):
@@ -119,6 +132,22 @@ def load_log(path):
             if kind == "turn.prompt":
                 trace.has_prompt = True
                 trace.ended = False
+                trace.kernel_ended = False
+                try:
+                    trace.kernel_turn_id = canonical_turn_id(row.get("turnId"))
+                except ValueError:
+                    trace.issues.append("unsupported_turn_boundary")
+            if kind == "turn.ended":
+                try:
+                    tid = canonical_turn_id(row.get("turnId"))
+                    trace.kernel_ended = row.get("reason") == "completed" and (
+                        trace.kernel_turn_id is None or trace.kernel_turn_id == tid)
+                    if trace.kernel_turn_id is None:
+                        trace.kernel_turn_id = tid
+                except ValueError:
+                    trace.kernel_ended = False
+                    trace.issues.append("unsupported_turn_boundary")
+                continue
             if kind == "agent.turn.started":
                 trace.ended = False
                 continue
@@ -132,6 +161,9 @@ def load_log(path):
                     # Child task delivery establishes stream start, never human consent.
                     trace.has_prompt = True
                     trace.ended = False
+                    if trace.kernel_ended:
+                        trace.kernel_turn_id = None
+                    trace.kernel_ended = False
                 continue
             if kind == "agent.turn.ended":
                 trace.ended = row.get("outcome") == "done"
@@ -150,6 +182,7 @@ def load_log(path):
                     trace.issues.append("unsupported_inner_event")
                 continue  # Text/reasoning/catalog activation cannot establish skill use.
             trace.ended = False
+            trace.kernel_ended = False
             cid = event.get("toolCallId")
             if not isinstance(cid, str) or not cid:
                 trace.issues.append("missing_call_id")
