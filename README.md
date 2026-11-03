@@ -13,6 +13,7 @@ Personal task-methodology plugin for **Kimi Work desktop**: Superpowers, Spec Ki
 - A Windows UserPromptSubmit hook that supplies the policy from this plugin through PowerShell. It reads only its own files, does not process/save the user prompt and does not block tools.
 - The `eja-methodology` child profile and a launch reference covering role, original proposal + approval, allowed paths, artifacts and evidence. Both delegation tools are excluded from this child; the parent owns further dispatch and independent review.
 - An original hedgehog icon.
+- An optional [independent local process auditor](docs/audit.md), with synthetic tests. It reads supported native journals and produces redacted text/JSON findings; formal checks do not certify full methodology compliance.
 
 ## Install / update
 
