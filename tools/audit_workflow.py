@@ -75,6 +75,7 @@ class Trace:
     ended: bool = False
     kernel_ended: bool = False
     kernel_turn_id: int | None = None
+    kernel_open: bool = False
 
     @property
     def complete(self):
@@ -135,21 +136,28 @@ def load_log(path):
                 trace.kernel_ended = False
                 try:
                     trace.kernel_turn_id = canonical_turn_id(row.get("turnId"))
+                    trace.kernel_open = True
                 except ValueError:
+                    trace.kernel_turn_id = None
+                    trace.kernel_open = False
                     trace.issues.append("unsupported_turn_boundary")
             if kind == "turn.ended":
                 try:
                     tid = canonical_turn_id(row.get("turnId"))
-                    trace.kernel_ended = row.get("reason") == "completed" and (
-                        trace.kernel_turn_id is None or trace.kernel_turn_id == tid)
-                    if trace.kernel_turn_id is None:
-                        trace.kernel_turn_id = tid
+                    matches = trace.kernel_open and trace.kernel_turn_id == tid
+                    trace.kernel_ended = row.get("reason") == "completed" and matches
+                    if not matches:
+                        trace.issues.append("unmatched_turn_end")
+                    trace.kernel_open = False
                 except ValueError:
                     trace.kernel_ended = False
                     trace.issues.append("unsupported_turn_boundary")
                 continue
             if kind == "agent.turn.started":
                 trace.ended = False
+                if not trace.kernel_open:
+                    trace.kernel_turn_id = None
+                trace.kernel_ended = False
                 continue
             if kind == "context.append_message":
                 message = row.get("message")
@@ -161,7 +169,7 @@ def load_log(path):
                     # Child task delivery establishes stream start, never human consent.
                     trace.has_prompt = True
                     trace.ended = False
-                    if trace.kernel_ended:
+                    if not trace.kernel_open:
                         trace.kernel_turn_id = None
                     trace.kernel_ended = False
                 continue

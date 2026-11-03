@@ -26,6 +26,7 @@ class Journal:
             "type": "context.append_message",
             "message": {"origin": {"kind": "user"}, "content": []},
         }]
+        self.rows.append({"type": "turn.prompt", "turnId": 0})
         self.counter = 0
 
     def event(self, event):
@@ -82,7 +83,6 @@ class AuditTests(unittest.TestCase):
 
     def test_actor_end_before_native_stop_is_not_kernel_completion(self):
         j = Journal()
-        j.rows.append({"type": "turn.prompt", "turnId": 0})
         for skill in (ENTRY, USING, VERIFY):
             j.skill(skill)
         j.rows.append({"type": "agent.turn.ended", "turnId": 0, "outcome": "done"})
@@ -95,6 +95,23 @@ class AuditTests(unittest.TestCase):
     def test_new_kernel_prompt_cannot_reuse_previous_completion(self):
         j = self.complete_reviewer()
         j.rows.extend([{"type": "turn.prompt", "turnId": 1},
+                       {"type": "agent.turn.ended", "turnId": 1, "outcome": "done"}])
+        self.assertEqual(self.run_audit(j)[0], 2)
+        j.rows.append({"type": "turn.ended", "turnId": 0, "reason": "completed"})
+        self.assertEqual(self.run_audit(j)[0], 2)
+
+    def test_context_only_new_work_cannot_accept_a_stale_kernel_end(self):
+        j = self.complete_reviewer()
+        j.rows.extend([{"type": "context.append_message", "message": {"origin": {"kind": "user"}, "content": []}},
+                       {"type": "agent.turn.started", "turnId": 1}])
+        j.call("Read", {"path": "source.mjs"})
+        j.rows.extend([{"type": "agent.turn.ended", "turnId": 1, "outcome": "done"},
+                       {"type": "turn.ended", "turnId": 0, "reason": "completed"}])
+        self.assertEqual(self.run_audit(j)[0], 2)
+
+    def test_new_actor_without_new_kernel_completion_is_unverified(self):
+        j = self.complete_reviewer()
+        j.rows.extend([{"type": "agent.turn.started", "turnId": 1},
                        {"type": "agent.turn.ended", "turnId": 1, "outcome": "done"}])
         self.assertEqual(self.run_audit(j)[0], 2)
         j.rows.append({"type": "turn.ended", "turnId": 0, "reason": "completed"})
@@ -293,7 +310,7 @@ class AuditTests(unittest.TestCase):
         j = Journal()
         for skill in (ENTRY, USING, VERIFY):
             j.skill(skill)
-        j.rows[3]["event"]["isError"] = True
+        next(r["event"] for r in j.rows if r.get("event", {}).get("type") == "tool.result")["isError"] = True
         _, report = self.run_audit(j.finish())
         self.assertEqual(self.status(report, "entry_first"), "FAIL")
 
@@ -325,7 +342,7 @@ class AuditTests(unittest.TestCase):
         j = Journal()
         for skill in (ENTRY, USING, VERIFY):
             j.skill(skill)
-        j.rows[3]["event"]["result"]["output"] = "New native success format"
+        next(r["event"] for r in j.rows if r.get("event", {}).get("type") == "tool.result")["result"]["output"] = "New native success format"
         code, report = self.run_audit(j.finish())
         self.assertEqual(code, 2)
         self.assertEqual(self.status(report, "entry_first"), "UNVERIFIED")
@@ -334,7 +351,8 @@ class AuditTests(unittest.TestCase):
         j = Journal()
         for skill in (ENTRY, USING, VERIFY):
             j.skill(skill)
-        j.rows.insert(4, dict(j.rows[2]))
+        call = next(r for r in j.rows if r.get("event", {}).get("type") == "tool.call")
+        j.rows.insert(4, dict(call))
         code, _ = self.run_audit(j.finish())
         self.assertEqual(code, 2)
 
@@ -393,8 +411,10 @@ class AuditTests(unittest.TestCase):
 
     def test_review_first_entry_must_finish_before_next_tool(self):
         j = self.complete_reviewer()
-        result = j.rows.pop(3)
-        j.rows.insert(4, result)
+        result_index = next(i for i, r in enumerate(j.rows) if r.get("event", {}).get("type") == "tool.result")
+        result = j.rows.pop(result_index)
+        second_call = next(i for i, r in enumerate(j.rows) if r.get("event", {}).get("type") == "tool.call" and r["event"]["toolCallId"] == "tool_2")
+        j.rows.insert(second_call + 1, result)
         _, report = self.run_audit(j)
         self.assertEqual(self.status(report, "entry_first"), "FAIL")
 
