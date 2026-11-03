@@ -440,6 +440,14 @@ class InternalAuditTests(unittest.TestCase):
         def malformed_result_turn(rows):
             next(row["event"] for row in rows if "parentUuid" in row.get("event", {}))["turnId"] = True
 
+        def prompt_agent(rows, agent):
+            for row in rows:
+                if row.get("type") == "turn.prompt":
+                    if agent is None:
+                        row.pop("agentId", None)
+                    else:
+                        row["agentId"] = agent
+
         def bad_origin_metadata(rows, key, value):
             for row in rows:
                 origin = row.get("origin") or row.get("message", {}).get("origin")
@@ -452,6 +460,8 @@ class InternalAuditTests(unittest.TestCase):
                 ("unrelated_result", wrong_parent), ("duplicate_activation", duplicate_activation),
                 ("different_kernel", wrong_kernel),
                 ("malformed_result_turn", malformed_result_turn),
+                ("foreign_prompt_agent", lambda rows: prompt_agent(rows, "agent-foreign")),
+                ("missing_prompt_agent", lambda rows: prompt_agent(rows, None)),
                 ("unknown_origin_field", lambda rows: bad_origin_metadata(rows, "future", True)),
                 ("malformed_origin_path", lambda rows: bad_origin_metadata(rows, "skillPath", []))):
             with self.subTest(label=label):

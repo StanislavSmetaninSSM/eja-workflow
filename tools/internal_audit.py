@@ -245,6 +245,7 @@ def _skill_steering(wire, records, turn_id, prompt_id):
 def _scope(wire, call_id, stop_command):
     """Bind to a kernel task; Stop can start another actor run inside that task."""
     active, prompt_id, start, stops, found = None, None, 0, [], None
+    prompt_agent = None
     steering = []
     for number, row in _records(wire):
         if not isinstance(row, dict):
@@ -255,6 +256,9 @@ def _scope(wire, call_id, stop_command):
                 raise ValueError("work_unit_changed")
             active = aw.canonical_turn_id(row.get("turnId")) if kind == "turn.prompt" else None
             prompt_id = row.get("promptId") if kind == "turn.prompt" else None
+            prompt_agent = row.get("agentId") if kind == "turn.prompt" else None
+            if prompt_agent is not None and prompt_agent != wire.parent.name:
+                raise ValueError("boundary_agent_mismatch")
             start, stops = number, []
             steering = []
         message = row.get("message")
@@ -289,6 +293,8 @@ def _scope(wire, call_id, stop_command):
             found = {"turn_id": active, "start_line": start, "stop_line": stops[0]}
     if found is None or len(stops) != 1:
         raise ValueError("stop_origin_unavailable")
+    if any(row["kind"] == "prompt.steered" for row in steering) and prompt_agent != wire.parent.name:
+        raise ValueError("skill_steering_prompt_agent_unavailable")
     _skill_steering(wire, steering, found["turn_id"], prompt_id)
     return found
 
