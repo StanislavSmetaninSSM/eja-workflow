@@ -1,7 +1,7 @@
 {
   "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
   "name": "eja-workflow",
-  "version": "0.10.3",
+  "version": "0.11.0",
   "description": "Обязательная методология рабочих задач Kimi Work и установка недостающих компонентов.",
   "keywords": [
     "workflow",
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "Eja Workflow",
     "shortDescription": "Методология задач: Superpowers, Spec Kit, мост и Serena.",
-    "longDescription": "Стартовый скилл, контроль этапов, дочерний профиль и локальный аудитор. Экспериментальная внутренняя проверка после рабочей задачи использует только Stop и точную привязку вызова аудитора. UserPromptSubmit и автоматическая доставка стартового протокола не используются. Пользовательские сообщения не переписываются; модель может не выполнить продолжение. Строгое соблюдение методологии не гарантируется.",
+    "longDescription": "Стартовый скилл, контроль этапов, дочерний профиль и локальный аудитор. Внутренняя проверка использует Stop и точную привязку команды аудита; необязательный контроль Agent/AgentSwarm по умолчанию выключен и ограничен явно выбранной папкой/сроком. Пользовательские сообщения не переписываются; модель может не выполнить продолжение. Строгое соблюдение методологии не гарантируется.",
     "developerName": "Eja",
     "websiteURL": "https://github.com/StanislavSmetaninSSM/eja-workflow",
     "iconUrl": "",
@@ -50,6 +50,18 @@
       "event": "PreToolUse",
       "matcher": "Bash",
       "command": "python -B -X utf8 \"%KIMI_PLUGIN_ROOT%\\tools\\internal_audit.py\" pretool",
+      "timeout": 10
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Agent",
+      "command": "python -B -X utf8 \"%KIMI_PLUGIN_ROOT%\\tools\\delegation_guard.py\" pretool",
+      "timeout": 10
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "AgentSwarm",
+      "command": "python -B -X utf8 \"%KIMI_PLUGIN_ROOT%\\tools\\delegation_guard.py\" pretool",
       "timeout": 10
     }
   ]

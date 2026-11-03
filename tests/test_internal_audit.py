@@ -123,6 +123,7 @@ class InternalAuditTests(unittest.TestCase):
         _, command = self.bind(ticket)
         journal, _ = self.pending(command, skills=(ENTRY, USING, VERIFY), code=True)
         own_call, stop = journal.rows.pop(), journal.rows.pop()
+        journal.symbol()
         journal.call("Bash", {"command": "node --test"}, "review probe passed")
         journal.rows.extend((stop, own_call))
         self.write(journal)
@@ -171,6 +172,29 @@ class InternalAuditTests(unittest.TestCase):
         self.write(Journal().finish())
         self.assertEqual(ia.stop_hook(self.payload, self.root, self.home), {})
 
+    def test_read_only_code_work_is_stop_eligible_without_a_shell_command(self):
+        j = Journal()
+        for skill in (ENTRY, USING):
+            j.skill(skill)
+        j.call("Read", {"path": "module.mjs"})
+        self.write(j)
+        response = ia.stop_hook(self.payload, self.root, self.home)
+        self.assertIn("hookSpecificOutput", response)
+        self.assertEqual(response["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_internal_swarm_attempt_always_retains_manual_lifecycle_coverage(self):
+        ticket = self.issue()
+        _, command = self.bind(ticket)
+        j, _ = self.pending(command, skills=(ENTRY, USING, VERIFY))
+        own_call, stop = j.rows.pop(), j.rows.pop()
+        j.call("AgentSwarm", {"items": ["a", "b"], "prompt_template": "Review {{item}}"}, "swarm mode off", True)
+        j.rows.extend((stop, own_call))
+        self.write(j)
+        report = ia.check_ticket(ticket, "check", self.root, self.home, wait_seconds=0)
+        self.assertEqual(next(f["status"] for f in report["findings"] if f["rule"] == "swarm_coverage"), "UNVERIFIED")
+        self.assertIn("native_agent_swarm_lifecycle", report["manual_coverage"])
+        self.assertNotEqual(report["formal_status"], "PASS")
+
     def test_work_stop_returns_internal_continuation_not_a_message(self):
         j = Journal()
         j.rows.append({"type": "turn.prompt", "turnId": 0})
@@ -190,7 +214,7 @@ class InternalAuditTests(unittest.TestCase):
 
     def test_actual_tool_cli_does_not_require_hook_only_environment(self):
         (self.root / "tools").mkdir()
-        for name in ("internal_audit.py", "audit_workflow.py"):
+        for name in ("internal_audit.py", "audit_workflow.py", "delegation_contract.py", "delegation_guard.py"):
             shutil.copy2(ROOT / "tools" / name, self.root / "tools" / name)
         ticket = self.issue()
         decision, command = self.bind(ticket)
@@ -210,14 +234,14 @@ class InternalAuditTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Native Windows hook transport")
     def test_manifest_stop_and_pretool_really_transfer_native_stdin(self):
         (self.root / "tools").mkdir()
-        for name in ("internal_audit.py", "audit_workflow.py"):
+        for name in ("internal_audit.py", "audit_workflow.py", "delegation_contract.py", "delegation_guard.py"):
             shutil.copy2(ROOT / "tools" / name, self.root / "tools" / name)
         j = Journal()
         j.rows.append({"type": "turn.prompt", "turnId": 0})
         j.call("Write", {"path": "port.mjs", "content": "fixture"})
         self.write(j)
         manifest = json.loads((ROOT / "kimi.plugin.json").read_text(encoding="utf-8"))
-        hooks = {h["event"]: h["command"] for h in manifest["hooks"]}
+        hooks = {h["event"]: h["command"] for h in manifest["hooks"] if h.get("matcher", "Bash") == "Bash"}
         environment = dict(os.environ, KIMI_PLUGIN_ROOT=str(self.root), KIMI_CODE_HOME=str(self.home))
         response = subprocess.run(hooks["Stop"], shell=True, env=environment, input=json.dumps(self.payload),
             capture_output=True, encoding="utf-8", timeout=10)
@@ -231,6 +255,33 @@ class InternalAuditTests(unittest.TestCase):
             capture_output=True, encoding="utf-8", timeout=10)
         self.assertEqual(response.returncode, 0, response.stderr)
         self.assertEqual(json.loads(response.stdout), {})
+        ticket = command.split("--ticket ", 1)[1].split()[0]
+        binding = json.loads(ia.ticket_path(self.home, ticket).with_suffix(".check.binding.json").read_text())
+        self.assertEqual(binding["tool_call_id"], "native-call")
+
+    @unittest.skipUnless(os.name == "nt", "Native Windows hook transport")
+    def test_manifest_delegation_hooks_really_refuse_only_opted_in_calls(self):
+        import delegation_guard as guard
+        (self.root / "tools").mkdir()
+        for name in ("delegation_contract.py", "delegation_guard.py"):
+            shutil.copy2(ROOT / "tools" / name, self.root / "tools" / name)
+        manifest = json.loads((ROOT / "kimi.plugin.json").read_text(encoding="utf8"))
+        hooks = {h.get("matcher"): h["command"] for h in manifest["hooks"] if h["event"] == "PreToolUse"}
+        environment = dict(os.environ, KIMI_PLUGIN_ROOT=str(self.root), KIMI_CODE_HOME=str(self.home))
+        for opted_in in (False, True):
+            if opted_in:
+                guard._configure(self.home, self.payload["cwd"], 1800)
+            for tool in ("Agent", "AgentSwarm"):
+                payload = {**self.payload, "hook_event_name": "PreToolUse", "tool_name": tool,
+                           "tool_call_id": "native-" + tool, "tool_input": {"subagent_type": "coder"}}
+                response = subprocess.run(hooks[tool], shell=True, env=environment, input=json.dumps(payload),
+                                          capture_output=True, encoding="utf8", timeout=10)
+                self.assertEqual(response.returncode, 0, response.stderr)
+                result = json.loads(response.stdout)
+                if opted_in:
+                    self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
+                else:
+                    self.assertEqual(result, {})
 
     def test_missing_own_stop_message_cannot_consume_another_agents_ticket(self):
         ticket = self.issue()
@@ -401,6 +452,46 @@ class InternalAuditTests(unittest.TestCase):
         self.assertEqual(recovered.get("recovery_status"), "FORMAL_RECOVERED_LATE")
         self.assertEqual(recovered["formal_status"], "FAIL")  # First entry is still historically late.
         self.assertNotIn("PRIVATE", json.dumps(recovered))
+
+    def test_other_audit_command_does_not_count_as_recovery_verification(self):
+        def replace_check(rows):
+            for row in rows:
+                event = row.get("event", {})
+                if event.get("type") == "tool.call" and event.get("args", {}).get("command") == "node --test":
+                    event["args"]["command"] = ia.audit_command(self.root,
+                        "00000000-0000-4000-8000-000000000000", "check", self.home)
+        _, recovered = self.native_recovery(replace_check)
+        self.assertEqual(recovered.get("recovery_status"), "UNRESOLVED")
+
+    def test_exact_guard_denial_is_not_an_executed_child_or_independent_review(self):
+        import delegation_guard as guard
+        guard._configure(self.home, self.payload["cwd"], 1800)
+        args = {"subagent_type": "coder", "prompt": "PRIVATE_HANDOFF"}
+        payload = {**self.payload, "hook_event_name": "PreToolUse", "tool_name": "Agent",
+                   "tool_call_id": "tool_4", "tool_input": args}
+        reason = guard.pretool(payload, self.home, time.time())["hookSpecificOutput"]["permissionDecisionReason"]
+        j = Journal()
+        for skill in (ENTRY, USING, VERIFY):
+            j.skill(skill)
+        j.call("Agent", args, reason, True)
+        j.rows[-2]["event"]["uuid"] = "exact-native-call"
+        j.rows[-1]["event"]["parentUuid"] = "exact-native-call"
+        self.write(j.finish())
+        report = ia.aw.audit(ia.aw.load_log(self.wire), "delegator", guard_home=self.home, guard_session=self.session)
+        by_rule = {f["rule"]: f["status"] for f in report["findings"]}
+        self.assertEqual(by_rule["delegation_refused_before_execution"], "PASS")
+        self.assertNotIn("child_result", by_rule)
+        self.assertEqual(by_rule["independent_child"], "FAIL")
+        j.rows[-3]["event"]["parentUuid"] = "foreign-call"
+        self.write(j)
+        foreign = ia.aw.audit(ia.aw.load_log(self.wire), "delegator", guard_home=self.home, guard_session=self.session)
+        self.assertIn("child_result", {f["rule"] for f in foreign["findings"]})
+        j.rows[-3]["event"]["parentUuid"] = "exact-native-call"
+        args["prompt"] = "CHANGED_PRIVATE_HANDOFF"
+        j.rows[-4]["event"]["args"] = args
+        self.write(j)
+        changed = ia.aw.audit(ia.aw.load_log(self.wire), "delegator", guard_home=self.home, guard_session=self.session)
+        self.assertIn("child_result", {f["rule"] for f in changed["findings"]})
 
     def test_unsupported_skill_steering_cannot_bypass_user_or_identity_guards(self):
         def change(rows, field, value):

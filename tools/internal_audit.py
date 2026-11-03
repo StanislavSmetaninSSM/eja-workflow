@@ -319,7 +319,7 @@ def _unknown(reason):
             {"rule": reason, "status": "UNVERIFIED", "evidence": []}], "manual_coverage": ["identity_or_prefix_unavailable"]}
 
 
-def _checkpoint(wire, call_id, scope):
+def _checkpoint(wire, call_id, scope, home=None, session=None):
     trace = aw.load_log(wire)
     pending = {c["id"] for c in trace.calls} - set(trace.results)
     if (not trace.has_metadata or not trace.has_prompt or trace.ended or pending != {call_id}
@@ -328,7 +328,7 @@ def _checkpoint(wire, call_id, scope):
         return _unknown("checkpoint_prefix_unavailable")
     view = replace(trace, calls=trace.calls[:-1], issues=[])
     current_calls = [c for c in view.calls if c["line"] > scope["start_line"]]
-    report = aw.audit(view, "reviewer")
+    report = aw.audit(view, "reviewer", guard_home=home, guard_session=session)
     report["role"] = "observed_review_or_coordination"
     for finding in report["findings"]:
         if finding["rule"] == "evidence_complete":
@@ -357,17 +357,23 @@ def _checkpoint(wire, call_id, scope):
         else:
             report["role"] = "observed_code_writes_role_unverified"
             report["findings"].append({"rule": "code_write_role_applicability", "status": "UNVERIFIED", "evidence": []})
-        fresh = any(c["name"] == "Bash" and c["line"] > max(code) and c["id"] in trace.results
-            and not trace.results[c["id"]]["error"] for c in current_calls)
+        fresh = any(f["rule"] == "verification_before_check" and f["status"] == "PASS"
+                    for f in aw.phase_evidence(view, current_calls))
         report["findings"].append({"rule": "fresh_verification_evidence", "status": "PASS" if fresh else "FAIL", "evidence": []})
     if wire.parent.name == "main" and any(c["name"] == "Agent" for c in current_calls):
         child_view = replace(view, calls=[c for c in view.calls if c["name"] != "Agent" or c in current_calls])
-        children = aw.audit(child_view, "implementation")
+        children = aw.audit(child_view, "implementation", guard_home=home, guard_session=session)
         report["findings"].extend(f for f in children["findings"] if f["rule"].startswith("child_"))
+        report["findings"].extend(f for f in children["findings"] if f["rule"] == "delegation_refused_before_execution")
     report["scope"] = scope
     report["task_completion"] = "PENDING"
     report["boundary"] = "pre_completion_tool"
     report["manual_coverage"].extend(["full_phase_applicability", "final_turn_completion", "actual_verification_commands"])
+    swarm_calls = [c for c in current_calls if c["name"] == "AgentSwarm"]
+    if swarm_calls:
+        report["findings"].append({"rule": "swarm_coverage", "status": "UNVERIFIED",
+                                   "evidence": [{"source": "provided/wire.jsonl", "line": c["line"]} for c in swarm_calls]})
+        report["manual_coverage"].append("native_agent_swarm_lifecycle")
     statuses = {f["status"] for f in report["findings"]}
     report["formal_status"] = "FAIL" if "FAIL" in statuses else "UNVERIFIED" if "UNVERIFIED" in statuses else "PASS"
     return report
@@ -380,7 +386,8 @@ def _recovery(original, current, wire, first_call):
         return "UNRESOLVED"
     trace = aw.load_log(wire)
     boundary = next((c["line"] for c in trace.calls if c["id"] == first_call), float("inf"))
-    fresh_check = any(c["name"] == "Bash" and c["line"] > boundary and c["id"] in trace.results
+    fresh_check = any(c["name"] == "Bash" and not c.get("own_audit")
+        and c["line"] > boundary and c["id"] in trace.results
         and not trace.results[c["id"]]["error"] for c in trace.calls)
     failed = {f["rule"] for f in current["findings"] if f["status"] == "FAIL"}
     late = {"entry_first": {aw.ENTRY}, "execution_before_code": aw.EXECUTION,
@@ -416,7 +423,7 @@ def check_ticket(ticket, phase, root, home, wait_seconds=4):
             raise ValueError("caller_not_unique")
         agent, wire = matches[0]
         work_scope = _scope(wire, binding["tool_call_id"], audit_command(root, ticket, "check", home))
-        report = _checkpoint(wire, binding["tool_call_id"], work_scope)
+        report = _checkpoint(wire, binding["tool_call_id"], work_scope, home, value["session_id"])
         report["agent_id"] = agent
         if phase == "recheck":
             original = _read(report_path(home, ticket, "check"))
@@ -444,7 +451,8 @@ def stop_hook(payload, root, home):
             wire = _safe_wire(scope, agent.name)
             trace = aw.load_log(wire)
             task_open, start = _open_task(wire)
-            if task_open and any(c["code"] or c["name"] in {"Agent", "Bash"}
+            if task_open and any(c["code"] or c.get("code_read") or c.get("symbol_path")
+                    or c["name"] in {"Agent", "AgentSwarm", "Bash"}
                     or c["skill"] in set(aw.IMPLEMENTATION.values()) | aw.EXECUTION for c in trace.calls if c["line"] > start):
                 active_work = True
         if not active_work:

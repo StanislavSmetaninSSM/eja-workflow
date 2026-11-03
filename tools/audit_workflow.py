@@ -1,10 +1,14 @@
 """Read-only audit of observed Kimi Work actions; never certifies full compliance."""
 
 import argparse
+import hashlib
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
+
+from delegation_contract import parse_packet
+from delegation_guard import verify_receipt
 
 
 ENTRY = "eja-workflow:eja-workflow"
@@ -23,6 +27,11 @@ IMPLEMENTATION = {
     "finishing": "superpowers:finishing-a-development-branch",
 }
 KNOWN_SKILLS = {ENTRY, USING, VERIFY, *EXECUTION, *IMPLEMENTATION.values(),
+                "eja-workflow:workflow-checkpoint",
+                "superpowers:brainstorming", "superpowers:systematic-debugging",
+                "superpowers:dispatching-parallel-agents", "superpowers:using-git-worktrees",
+                "superpowers:diagnosing-superpowers", "superpowers:writing-skills",
+                "speckit-clarify", "speckit-checklist", "speckit-constitution", "speckit-converge",
                 "superpowers:requesting-code-review", "superpowers:receiving-code-review"}
 CODE_SUFFIXES = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".cs"}
 MAX_LINE = 8 * 1024 * 1024
@@ -76,6 +85,7 @@ class Trace:
     kernel_ended: bool = False
     kernel_turn_id: int | None = None
     kernel_open: bool = False
+    task_start_line: int = 0
 
     @property
     def complete(self):
@@ -122,6 +132,79 @@ def _valid_mcp_health(row):
     return row["resolution"] in ("recovered", "needs-auth", "disabled", "removed")
 
 
+def _symbol_result(output, expected_path):
+    """Recognize nonempty native find_symbol evidence without retaining source bodies."""
+    if not expected_path:
+        return False
+    try:
+        primary, separator, extra = output.partition("\n<mcp-result-extras>\n")
+        if separator:
+            if not extra.endswith("\n</mcp-result-extras>"):
+                return False
+            metadata = json.loads(extra[:-len("\n</mcp-result-extras>")])
+            if not isinstance(metadata, dict) or metadata.get("isError"):
+                return False
+        symbols = json.loads(primary)
+        if not isinstance(symbols, list) or not symbols:
+            return False
+        for symbol in symbols:
+            if not isinstance(symbol, dict):
+                return False
+            location = symbol.get("body_location")
+            if (not isinstance(symbol.get("name_path"), str) or not symbol["name_path"].strip()
+                    or not isinstance(symbol.get("kind"), str)
+                    or symbol.get("relative_path") != expected_path
+                    or not isinstance(location, dict)
+                    or type(location.get("start_line")) is not int
+                    or type(location.get("end_line")) is not int
+                    or not 0 <= location["start_line"] <= location["end_line"]):
+                return False
+        return True
+    except (ValueError, TypeError, RecursionError):
+        return False
+
+
+def phase_evidence(trace, calls=None):
+    """Check current observed code access and checks against completed dependencies."""
+    calls = [c for c in trace.calls if c["line"] > trace.task_start_line] if calls is None else calls
+    accesses = [c for c in calls if c.get("code") or c.get("code_read") or c.get("symbol_path")]
+    checks = [c for c in calls if c["name"] == "Bash" and not c.get("own_audit")]
+    findings = []
+    def finding(rule, ok, refs):
+        findings.append({"rule": rule, "status": "PASS" if ok else "FAIL" if trace.complete else "UNVERIFIED",
+                         "evidence": [{"source": "provided/wire.jsonl", "line": n} for n in refs]})
+    phases = [c for c in calls if c["name"] == "Skill" and c["skill"] in KNOWN_SKILLS]
+    if phases:
+        violations = []
+        for phase in phases:
+            dependent = min((c["line"] for c in calls if c["line"] > phase["line"]
+                             and c["name"] != "Skill" and not c.get("own_audit")), default=float("inf"))
+            result = trace.results.get(phase["id"], {})
+            if dependent != float("inf") and (result.get("loaded_skill") != phase["skill"]
+                    or result.get("error") or result.get("line", float("inf")) >= dependent):
+                violations.append(phase["line"])
+        finding("phase_instruction_order", not violations, violations)
+    if accesses:
+        symbolic = [trace.results[c["id"]]["line"] for c in calls
+                    if c.get("symbol_path") and c["id"] in trace.results
+                    and trace.results[c["id"]].get("symbolic") and not trace.results[c["id"]]["error"]]
+        finding("serena_symbolic_access", bool(symbolic), symbolic)
+    if checks or accesses:
+        writes = [c for c in calls if c.get("code")]
+        last_write = max((trace.results.get(c["id"], {}).get("line", float("inf")) for c in writes), default=0)
+        verified = []
+        for check in checks:
+            result = trace.results.get(check["id"], {})
+            loaded = any(c["name"] == "Skill" and c["skill"] == VERIFY
+                         and trace.results.get(c["id"], {}).get("loaded_skill") == VERIFY
+                         and not trace.results[c["id"]]["error"]
+                         and trace.results[c["id"]]["line"] < check["line"] for c in trace.calls)
+            if result and not result["error"] and last_write < check["line"] and loaded:
+                verified.append(check["line"])
+        finding("verification_before_check", bool(verified), verified)
+    return findings
+
+
 def load_log(path):
     """Stream the current native JSONL envelope without retaining private content."""
     path = Path(path)
@@ -158,6 +241,7 @@ def load_log(path):
                     trace.issues.append("unsupported_envelope")
                 continue
             if kind == "turn.prompt":
+                trace.task_start_line = number
                 trace.has_prompt = True
                 trace.ended = False
                 trace.kernel_ended = False
@@ -240,16 +324,46 @@ def load_log(path):
                 prompt = args.get("prompt", "")
                 if not isinstance(prompt, str):
                     prompt = ""
+                packet = None
+                if name == "Agent":
+                    try:
+                        packet = parse_packet(prompt)
+                    except ValueError:
+                        pass
+                fingerprint = None
+                if name in ("Agent", "AgentSwarm"):
+                    try:
+                        fingerprint = hashlib.sha256(json.dumps(args, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"), allow_nan=False).encode("utf8")).hexdigest()
+                    except (ValueError, TypeError, UnicodeError):
+                        trace.issues.append("unsupported_delegation_input")
+                symbol_path = (args.get("relative_path") if name in {
+                    "mcp__plugin-serena_serena__find_symbol", "mcp__serena__find_symbol"}
+                    and isinstance(args.get("name_path_pattern"), str) and args["name_path_pattern"].strip()
+                    and isinstance(args.get("relative_path"), str)
+                    and Path(args["relative_path"]).suffix.lower() in CODE_SUFFIXES else None)
+                command = args.get("command", "")
+                own_audit = isinstance(command, str) and bool(re.fullmatch(
+                    r'python -B -X utf8 "[^"\n]*[/\\]tools[/\\]internal_audit\.py" (?:check|recheck) '
+                    r'--ticket [0-9a-f-]{36} --home "[^"\n]+"', command))
                 trace.calls.append({"id": cid, "line": number, "name": name,
+                                    "uuid": event.get("uuid") if isinstance(event.get("uuid"), str) else None,
                                     "skill": skill if skill in KNOWN_SKILLS else None,
                                     "guide_read": name == "Read" and isinstance(file_path, str)
                                     and file_path.replace("\\", "/").endswith("references/child-agents.md"),
                                     "audit_read": name == "Read" and isinstance(file_path, str)
                                     and file_path.replace("\\", "/").endswith("references/contract-review.md"),
-                                    "packet_audit": _contains_policy(prompt) if name == "Agent" else False,
+                                    "packet_audit": (_contains_policy(packet.get("contract_review", "")) if packet
+                                                     else _contains_policy(prompt)) if name == "Agent" else False,
+                                    "packet_serena": bool(packet),
+                                    "input_sha256": fingerprint,
                                     "packet_entry": ENTRY in prompt and USING in prompt if name == "Agent" else False,
                                     "resume": bool(args.get("resume")),
                                     "fork": bool(args.get("fork")),
+                                    "code_read": name == "Read" and isinstance(file_path, str)
+                                    and Path(file_path).suffix.lower() in CODE_SUFFIXES,
+                                    "symbol_path": symbol_path,
+                                    "own_audit": own_audit,
                                     "code": name in ("Write", "Edit") and isinstance(file_path, str)
                                     and Path(file_path).suffix.lower() in CODE_SUFFIXES})
             else:
@@ -258,7 +372,12 @@ def load_log(path):
                     trace.issues.append("unsupported_result")
                     continue
                 result["error"] = bool(result["error"] or event.get("isError") or event.get("error"))
+                marker = re.match(r"\AEJA_DELEGATION_GUARD:([0-9a-f-]{36})\n", event["result"]["output"])
+                result["guard_marker"] = marker.group(1) if marker else None
+                result["parent_uuid"] = event.get("parentUuid") if isinstance(event.get("parentUuid"), str) else None
                 call = next((c for c in trace.calls if c["id"] == cid), None)
+                result["symbolic"] = bool(call and call.get("symbol_path") and not result["error"]
+                                          and _symbol_result(event["result"]["output"], call["symbol_path"]))
                 if (call and call["name"] == "Skill" and call["skill"] in KNOWN_SKILLS
                         and not result["error"] and result["loaded_skill"] != call["skill"]):
                     trace.issues.append("unsupported_skill_result")
@@ -268,7 +387,7 @@ def load_log(path):
     return trace
 
 
-def audit(trace, role, child_root=None, review_agents=()):
+def audit(trace, role, child_root=None, review_agents=(), guard_home=None, guard_session=None):
     """Evaluate bounded formal rules, keeping semantic and shell coverage explicit."""
     findings = []
 
@@ -313,10 +432,19 @@ def audit(trace, role, child_root=None, review_agents=()):
         positions = [min(loaded(s, before_code)) for s in ordered if loaded(s, before_code)]
         finding("planning_skill_order", len(positions) >= 2 and positions == sorted(positions), positions)
     finding("verification", bool(loaded(VERIFY)), loaded(VERIFY))
+    findings.extend(phase_evidence(trace))
     if role in ("implementation", "delegator"):
         agent_calls = [c for c in trace.calls if c["name"] == "Agent"]
+        considered = []
         for call in agent_calls:
             result = trace.results.get(call["id"], {})
+            if (guard_home is not None and guard_session is not None and result.get("error")
+                    and result.get("guard_marker") and call.get("input_sha256")
+                    and call.get("uuid") and call["uuid"] == result.get("parent_uuid")
+                    and verify_receipt(guard_home, guard_session, call["id"], call["input_sha256"], result["guard_marker"])):
+                finding("delegation_refused_before_execution", True, [call["line"], result["line"]])
+                continue
+            considered.append(call)
             aid = result.get("agent_id")
             if not aid or not result.get("completed_agent") or result.get("error"):
                 findings.append({"rule": "child_result", "status": "UNVERIFIED", "evidence": []})
@@ -324,6 +452,7 @@ def audit(trace, role, child_root=None, review_agents=()):
             prefix = "child_" + aid + "_"
             finding(prefix + "custom_role", result["custom_role"], [result["line"]])
             finding(prefix + "entry_packet", call["packet_entry"], [call["line"]])
+            finding(prefix + "serena_packet", call.get("packet_serena", False), [call["line"]])
             guides = [c["line"] for c in trace.calls if c["guide_read"] and c["line"] < call["line"]
                       and c["id"] in trace.results and not trace.results[c["id"]]["error"]
                       and trace.results[c["id"]]["line"] < call["line"]]
@@ -362,7 +491,7 @@ def audit(trace, role, child_root=None, review_agents=()):
                 rereads = [c["line"] for c in reads if c["line"] > result["line"]
                            and trace.results[c["id"]]["line"] < next_code]
                 finding("review_receipt_reread", bool(rereads), rereads)
-        if not agent_calls:
+        if not considered:
             finding("independent_child", False)
         if role == "implementation":
             actual_ids = {trace.results.get(c["id"], {}).get("agent_id") for c in agent_calls}

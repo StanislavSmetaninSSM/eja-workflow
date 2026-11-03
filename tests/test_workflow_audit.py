@@ -43,6 +43,12 @@ class Journal:
         self.call("Skill", {"skill": name}, "denied" if failed else
                   f'Skill "{name}" loaded inline. Follow its instructions.', failed)
 
+    def symbol(self, path="port.mjs"):
+        """Supply a real-shaped successful symbol result for isolated phase tests."""
+        self.call("mcp__plugin-serena_serena__find_symbol", {"name_path_pattern": "example", "relative_path": path},
+                  json.dumps([{"name_path": "example", "kind": "Function", "relative_path": path,
+                               "body_location": {"start_line": 0, "end_line": 1}}]))
+
     def finish(self):
         self.rows.append({"type": "turn.ended", "turnId": 0, "reason": "completed"})
         self.rows.append({"type": "agent.turn.ended", "outcome": "done"})
@@ -71,6 +77,119 @@ class AuditTests(unittest.TestCase):
         found = [f["status"] for f in report["findings"] if f["rule"] == rule]
         self.assertTrue(found, f"Missing audit rule: {rule}")
         return found[0]
+
+    def test_batched_verification_cannot_credit_an_earlier_check(self):
+        j = Journal()
+        j.skill(ENTRY)
+        j.skill(USING)
+        j.event({"type": "tool.call", "name": "Skill", "args": {"skill": VERIFY}, "toolCallId": "verify"})
+        j.call("Bash", {"command": "node --test"})
+        j.event({"type": "tool.result", "toolCallId": "verify", "result": {
+            "output": f'Skill "{VERIFY}" loaded inline. Follow its instructions.'}})
+        _, report = self.run_audit(j.finish())
+        self.assertEqual(self.status(report, "verification_before_check"), "FAIL")
+
+    def test_instruction_result_then_fresh_check_is_credited(self):
+        j = Journal()
+        for skill in (ENTRY, USING, VERIFY):
+            j.skill(skill)
+        j.call("Bash", {"command": "node --test"})
+        _, report = self.run_audit(j.finish())
+        self.assertEqual(self.status(report, "verification_before_check"), "PASS")
+
+    def test_checkpoint_instructions_must_arrive_before_dependent_command(self):
+        j = Journal()
+        for skill in (ENTRY, USING, VERIFY):
+            j.skill(skill)
+        checkpoint = "eja-workflow:workflow-checkpoint"
+        j.event({"type": "tool.call", "name": "Skill", "args": {"skill": checkpoint}, "toolCallId": "phase"})
+        j.call("Bash", {"command": "node --test"})
+        j.event({"type": "tool.result", "toolCallId": "phase", "result": {
+            "output": f'Skill "{checkpoint}" loaded inline. Follow its instructions.'}})
+        _, report = self.run_audit(j.finish())
+        self.assertEqual(self.status(report, "phase_instruction_order"), "FAIL")
+
+    def test_independent_phase_loads_may_finish_before_work(self):
+        j = Journal()
+        for skill in (ENTRY, USING, VERIFY):
+            j.skill(skill)
+        phases = {"phase-a": "eja-workflow:workflow-checkpoint", "phase-b": EXECUTE}
+        for cid, skill in phases.items():
+            j.event({"type": "tool.call", "name": "Skill", "args": {"skill": skill}, "toolCallId": cid})
+        for cid, skill in phases.items():
+            j.event({"type": "tool.result", "toolCallId": cid, "result": {
+                "output": f'Skill "{skill}" loaded inline. Follow its instructions.'}})
+        j.call("Bash", {"command": "node --test"})
+        _, report = self.run_audit(j.finish())
+        self.assertEqual(self.status(report, "phase_instruction_order"), "PASS")
+
+    def test_debug_brainstorm_and_spec_clarification_cannot_race_dependent_work(self):
+        for phase in ("superpowers:systematic-debugging", "superpowers:brainstorming",
+                      "speckit-clarify", "superpowers:using-git-worktrees"):
+            with self.subTest(phase=phase):
+                j = Journal()
+                for skill in (ENTRY, USING, VERIFY):
+                    j.skill(skill)
+                j.event({"type": "tool.call", "name": "Skill", "args": {"skill": phase}, "toolCallId": "phase"})
+                j.call("Bash", {"command": "node --test"})
+                j.event({"type": "tool.result", "toolCallId": "phase", "result": {
+                    "output": f'Skill "{phase}" loaded inline. Follow its instructions.'}})
+                _, report = self.run_audit(j.finish())
+                self.assertEqual(self.status(report, "phase_instruction_order"), "FAIL")
+
+    def test_check_before_parallel_write_finishes_is_not_fresh(self):
+        j = Journal()
+        for skill in (ENTRY, USING, VERIFY):
+            j.skill(skill)
+        j.event({"type": "tool.call", "name": "Write", "args": {"path": "module.mjs"}, "toolCallId": "write"})
+        j.call("Bash", {"command": "node --test"})
+        j.event({"type": "tool.result", "toolCallId": "write", "result": {"output": "ok"}})
+        _, report = self.run_audit(j.finish())
+        self.assertEqual(self.status(report, "verification_before_check"), "FAIL")
+
+    def test_code_review_requires_real_symbolic_access_not_health_or_activation(self):
+        j = Journal()
+        for skill in (ENTRY, USING, VERIFY):
+            j.skill(skill)
+        j.call("Read", {"path": "module.mjs"})
+        j.call("mcp__plugin-serena_serena__activate_project", {"project": "C:/owned"}, "Project activated")
+        j.call("Bash", {"command": "node --test"})
+        _, report = self.run_audit(j.finish())
+        self.assertEqual(self.status(report, "serena_symbolic_access"), "FAIL")
+
+    def test_nonempty_matching_native_symbol_result_is_credited_without_body_leak(self):
+        j = Journal()
+        for skill in (ENTRY, USING, VERIFY):
+            j.skill(skill)
+        j.call("Read", {"path": "module.mjs"})
+        symbols = [{"name_path": "example", "kind": "Function", "relative_path": "module.mjs",
+                    "body_location": {"start_line": 0, "end_line": 4}, "body": "PRIVATE_SYMBOL_BODY"}]
+        j.call("mcp__plugin-serena_serena__find_symbol", {
+            "name_path_pattern": "example", "relative_path": "module.mjs"},
+            json.dumps(symbols) + '\n<mcp-result-extras>\n{"structuredContent":{}}\n</mcp-result-extras>')
+        j.call("Bash", {"command": "node --test"})
+        _, report = self.run_audit(j.finish())
+        self.assertEqual(self.status(report, "serena_symbolic_access"), "PASS")
+        self.assertNotIn("PRIVATE_SYMBOL_BODY", json.dumps(report))
+
+    def test_empty_failed_foreign_or_fake_symbol_results_do_not_grant_credit(self):
+        symbols = [{"name_path": "example", "kind": "Function", "relative_path": "other.mjs",
+                    "body_location": {"start_line": 0, "end_line": 4}}]
+        cases = [("mcp__plugin-serena_serena__find_symbol", "[]", False),
+                 ("mcp__plugin-serena_serena__find_symbol", json.dumps(symbols), False),
+                 ("mcp__plugin-serena_serena__find_symbol", "not JSON", False),
+                 ("fake_serena_find_symbol", json.dumps(symbols), False),
+                 ("mcp__plugin-serena_serena__find_symbol", json.dumps([{**symbols[0], "relative_path": "module.mjs"}]), True)]
+        for name, output, error in cases:
+            with self.subTest(name=name, output=output, error=error):
+                j = Journal()
+                for skill in (ENTRY, USING, VERIFY):
+                    j.skill(skill)
+                j.call("Read", {"path": "module.mjs"})
+                j.call(name, {"relative_path": "module.mjs", "name_path_pattern": "example"}, output, error)
+                j.call("Bash", {"command": "node --test"})
+                _, report = self.run_audit(j.finish())
+                self.assertEqual(self.status(report, "serena_symbolic_access"), "FAIL")
 
     def test_valid_mcp_health_metadata_preserves_phase_evidence(self):
         for transport in ("stdio", "http", "sse"):
@@ -222,7 +341,8 @@ class AuditTests(unittest.TestCase):
         policy = (ROOT / "skills/eja-workflow/references/contract-review.md").read_text(encoding="utf-8")
         j.call("Read", {"path": "references/child-agents.md"})
         j.call("Read", {"path": "references/contract-review.md"}, policy)
-        j.call("Agent", {"subagent_type": "eja-methodology", "prompt": f"{ENTRY} {USING}\n{policy}"},
+        from test_delegation_guard import make_packet
+        j.call("Agent", {"subagent_type": "eja-methodology", "prompt": make_packet()},
                f"agent_id: agent-1\nactual_subagent_type: {actual}\nstatus: completed\nstop_reason: completed\n\n[summary]\nDone")
         j.skill("superpowers:receiving-code-review")
         j.call("Read", {"path": "references/contract-review.md"}, policy)
@@ -251,6 +371,23 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(self.status(report, "child_agent-1_entry_first"), "PASS")
         self.assertEqual(self.status(report, "child_agent-1_custom_role"), "PASS")
         self.assertEqual(self.status(report, "review_receipt_reread"), "PASS")
+
+    def test_json_packet_preserves_full_review_protocol_and_serena_row(self):
+        self.child()
+        _, report = self.run_audit(self.delegation(), "delegator")
+        self.assertEqual(self.status(report, "review_dispatch_audit"), "PASS")
+        self.assertEqual(self.status(report, "child_agent-1_serena_packet"), "PASS")
+
+    def test_legacy_packet_does_not_invent_missing_serena_state(self):
+        self.child()
+        j = self.delegation()
+        for row in j.rows:
+            event = row.get("event", {})
+            if event.get("type") == "tool.call" and event.get("name") == "Agent":
+                policy = (ROOT / "skills/eja-workflow/references/contract-review.md").read_text(encoding="utf8")
+                event["args"]["prompt"] = f"{ENTRY} {USING}\n{policy}"
+        _, report = self.run_audit(j, "delegator")
+        self.assertEqual(self.status(report, "child_agent-1_serena_packet"), "FAIL")
 
     def test_requested_role_does_not_override_actual_coder(self):
         self.child()

@@ -4,7 +4,7 @@
 
 Personal task-methodology plugin for **Kimi Work desktop**: Superpowers, Spec Kit, their bridge, Serena and independent review. Technical plugin id: `eja-workflow`.
 
-**Local experimental 0.10.2 candidate; native acceptance pending.** Safe private main 0.9.1 remains the fallback.
+**Local experimental 0.11.0 candidate; frozen native diagnostic acceptance pending.** Safe private main 0.9.1 remains the fallback. The previous0.10.3 Swarm review proved two custom profiles and automatic late audit correction, with ordering/Serena failures retained.
 
 **Private preview.** Instructions and observed use are distinct. This plugin does not guarantee automatic compliance or technically enforce every workflow transition. The tested delivery path is Windows / Kimi Work 3.2.24.27.
 
@@ -16,6 +16,7 @@ Personal task-methodology plugin for **Kimi Work desktop**: Superpowers, Spec Ki
 - The `eja-methodology` child profile and a launch reference covering role, original proposal + approval, allowed paths, artifacts and evidence. Both delegation tools are excluded from this child; the parent owns further dispatch and independent review.
 - An original hedgehog icon.
 - An optional [independent local process auditor](docs/audit.md), with synthetic tests. It reads supported native journals and produces redacted text/JSON findings; formal checks do not certify full methodology compliance.
+- An optional, initially disabled, [delegation guard](docs/delegation-guard.md). It refuses objectively incomplete Agent/AgentSwarm calls only in an explicitly configured exact workspace for at most one hour. It does not rewrite inputs, require project AGENTS, change auto mode or send user messages.
 
 ## Install / update
 
@@ -32,7 +33,7 @@ In the tested Work build, the engine disables ordinary plugin sessionStart/syste
 
 A real native Agent call confirmed the custom child system body and the exclusion of Agent/AgentSwarm. A focused read-only approval review loaded its own entry skills and identified the approved clause correctly. This does not establish all-phase adherence. Parent routing and receipt checks remain model behavior. AgentSwarm fan-out has not been live-validated for this plugin; native auto mode is preserved.
 
-The standalone auditor requires both the completed kernel task and the completed agent run. This local candidate contains an experimental [internal Stop audit](docs/internal-audit.md). It uses exactly Stop and a fixed-auditor PreToolUse binding, without UserPromptSubmit, sessionStart, AGENTS setup, global override or external chat reports. Actual live audit/correction/recheck and rendered-UI acceptance are pending. Eligibility can miss unsupported/unflushed work, including documentation-only or read-only tasks without qualifying calls. Overall automatic-methodology acceptance remains unmet; this is a skill/role/auditor package, not an automatic enforcement mode. Recheck capabilities after Work updates.
+The standalone auditor requires both the completed kernel task and the completed agent run. This candidate contains an experimental [internal Stop audit](docs/internal-audit.md): Stop and fixed-auditor Bash binding, plus two opt-in delegation matchers. No UserPromptSubmit, sessionStart, AGENTS setup, global override or external chat reports. Earlier native audit/correction/recheck and a no-injected-user-message outcome were observed, with methodology failures;0.11.0's new candidate still needs its own frozen tests. Eligibility can miss unsupported/unflushed work, including documentation-only or read-only tasks without qualifying calls. Verification now checks successful instruction-result order and a subsequent successful shell check after code writes; recognized nonempty find_symbol results provide bounded per-actor Serena evidence, not proof of correct active project or semantic correctness. Overall automatic-methodology acceptance remains unmet. Recheck capabilities after Work updates.
 
 ## Repository scope
 
