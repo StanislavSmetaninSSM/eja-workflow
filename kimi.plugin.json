@@ -1,0 +1,54 @@
+{
+  "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
+  "name": "eja-workflow",
+  "version": "0.8.0",
+  "description": "Обязательная методология рабочих задач Kimi Work и установка недостающих компонентов.",
+  "keywords": [
+    "workflow",
+    "superpowers",
+    "spec-kit",
+    "serena"
+  ],
+  "author": "Eja",
+  "license": "UNLICENSED",
+  "skillInstructions": "Применяй этот скилл в Kimi Work с фактически доступными инструментами. Точные правила пользователя и согласованный объём выше общих рекомендаций. Не загружай стартовый скилл рекурсивно.",
+  "interface": {
+    "displayName": "Eja Workflow",
+    "shortDescription": "Методология задач: Superpowers, Spec Kit, мост и Serena.",
+    "longDescription": "Стартовый скилл, формы проверки этапов и дочерний профиль eja-methodology с инструкцией по передаче согласованного контракта. Содержит ссылки для установки недостающих зависимостей. В Windows штатный UserPromptSubmit передаёт персональные правила в запрос через встроенный PowerShell: читает только файлы этого плагина, не сохраняет входящие данные и не блокирует инструменты. Доставка и соблюдение проверяются отдельно; гарантия поведения модели не заявляется.",
+    "developerName": "Eja",
+    "websiteURL": "https://github.com/StanislavSmetaninSSM/eja-workflow",
+    "iconUrl": "",
+    "category": "PRODUCTIVITY",
+    "defaultLocale": "en-US",
+    "tryPrompts": [
+      "Продолжи текущую feature по её tasks.md",
+      "Добавь небольшую функцию с проверкой результата"
+    ],
+    "skillOverrides": {
+      "eja-workflow": {
+        "displayName": "Eja Workflow",
+        "description": "Обязательный первый вызов инструмента для рабочих задач — до осмотра файлов, команд, исправлений, brainstorming, планирования и тестов. Малые и заранее одобренные задачи не исключение."
+      },
+      "workflow-checkpoint": {
+        "displayName": "Контроль этапа",
+        "description": "Обязателен при начале brainstorming и планирования, перед записью кода или тестов и после независимого ревью."
+      }
+    }
+  },
+  "skills": "./skills/",
+  "agents": [
+    "./agents/"
+  ],
+  "sessionStart": {
+    "skill": "eja-workflow"
+  },
+  "systemPromptPath": "./system-prompt.md",
+  "hooks": [
+    {
+      "event": "UserPromptSubmit",
+      "command": "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -Command \"[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; $root=$env:KIMI_PLUGIN_ROOT; $manifest=[System.IO.File]::ReadAllText([System.IO.Path]::Combine($root,'kimi.plugin.json'),[System.Text.Encoding]::UTF8) | ConvertFrom-Json; $intro=[System.IO.File]::ReadAllText([System.IO.Path]::Combine($root,'hooks','prompt-intro.md'),[System.Text.Encoding]::UTF8); $policy=[System.IO.File]::ReadAllText([System.IO.Path]::Combine($root,'system-prompt.md'),[System.Text.Encoding]::UTF8); $message='eja-workflow delivery '+$manifest.version+[Environment]::NewLine+'Plugin root: '+$root+[Environment]::NewLine+$intro+[Environment]::NewLine+$policy; [Console]::Out.Write((@{message=$message} | ConvertTo-Json -Compress))\"",
+      "timeout": 10
+    }
+  ]
+}
