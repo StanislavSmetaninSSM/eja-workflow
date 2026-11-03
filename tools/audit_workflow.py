@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 
-from delegation_contract import parse_packet
+from delegation_contract import parse_packet, lexical_path
 from delegation_guard import verify_receipt
 
 
@@ -86,6 +86,7 @@ class Trace:
     kernel_turn_id: int | None = None
     kernel_open: bool = False
     task_start_line: int = 0
+    assignment: dict | None = None
 
     @property
     def complete(self):
@@ -173,6 +174,19 @@ def phase_evidence(trace, calls=None):
     def finding(rule, ok, refs):
         findings.append({"rule": rule, "status": "PASS" if ok else "FAIL" if trace.complete else "UNVERIFIED",
                          "evidence": [{"source": "provided/wire.jsonl", "line": n} for n in refs]})
+    if trace.assignment and trace.assignment["role"] == "review":
+        if trace.assignment["result_delivery"] == "inline":
+            findings.append({"rule": "review_inline_delivery", "status": "UNVERIFIED", "evidence": []})
+        else:
+            persisted = []
+            for call in calls:
+                result = trace.results.get(call["id"], {})
+                if (call.get("file_path") == trace.assignment["result_artifact"]
+                        and call["name"] in ("Write", "Edit") and call.get("uuid")
+                        and call.get("native_task") and result.get("native_task")
+                        and result.get("parent_uuid") == call["uuid"] and not result.get("error", True)):
+                    persisted.append(result["line"])
+            finding("review_artifact_persisted", bool(persisted), persisted)
     phases = [c for c in calls if c["name"] == "Skill" and c["skill"] in KNOWN_SKILLS]
     if phases:
         violations = []
@@ -242,12 +256,27 @@ def load_log(path):
                 continue
             if kind == "turn.prompt":
                 trace.task_start_line = number
+                trace.assignment = None
                 trace.has_prompt = True
                 trace.ended = False
                 trace.kernel_ended = False
                 try:
                     trace.kernel_turn_id = canonical_turn_id(row.get("turnId"))
                     trace.kernel_open = True
+                    origin, inputs = row.get("origin"), row.get("input")
+                    if (row.get("agentId") == path.parent.name
+                            and re.fullmatch(r"agent-[0-9]+", path.parent.name)
+                            and origin == {"kind": "system_trigger", "name": "subagent"}
+                            and isinstance(inputs, list) and len(inputs) == 1
+                            and isinstance(inputs[0], dict) and inputs[0].get("type") == "text"):
+                        try:
+                            packet = parse_packet(inputs[0].get("text"))
+                            if packet["role"] == "review":
+                                trace.assignment = {"role": "review", "result_delivery": packet["result_delivery"],
+                                                    "result_artifact": str(lexical_path(packet["result_artifact"]))
+                                                    if packet["result_delivery"] == "artifact" else None}
+                        except ValueError:
+                            pass
                 except ValueError:
                     trace.kernel_turn_id = None
                     trace.kernel_open = False
@@ -300,6 +329,12 @@ def load_log(path):
                 if event_kind not in ("step.begin", "step.end", "content.part"):
                     trace.issues.append("unsupported_inner_event")
                 continue  # Text/reasoning/catalog activation cannot establish skill use.
+            native_task = row.get("agentId") == path.parent.name and trace.kernel_open
+            try:
+                if event_kind == "tool.call" or "turnId" in event:
+                    native_task = native_task and canonical_turn_id(event.get("turnId")) == trace.kernel_turn_id
+            except ValueError:
+                native_task = False
             trace.ended = False
             trace.kernel_ended = False
             cid = event.get("toolCallId")
@@ -321,6 +356,12 @@ def load_log(path):
                 file_path = args.get("path", args.get("file_path", args.get("relative_path", "")))
                 if name in ("Read", "Write", "Edit") and (not isinstance(file_path, str) or not file_path):
                     trace.issues.append("unsupported_file_path")
+                normalized_file = None
+                if name in ("Write", "Edit"):
+                    try:
+                        normalized_file = str(lexical_path(file_path))
+                    except (ValueError, TypeError):
+                        pass
                 prompt = args.get("prompt", "")
                 if not isinstance(prompt, str):
                     prompt = ""
@@ -347,7 +388,9 @@ def load_log(path):
                     r'python -B -X utf8 "[^"\n]*[/\\]tools[/\\]internal_audit\.py" (?:check|recheck) '
                     r'--ticket [0-9a-f-]{36} --home "[^"\n]+"', command))
                 trace.calls.append({"id": cid, "line": number, "name": name,
+                                    "native_task": native_task,
                                     "uuid": event.get("uuid") if isinstance(event.get("uuid"), str) else None,
+                                    "file_path": normalized_file,
                                     "skill": skill if skill in KNOWN_SKILLS else None,
                                     "guide_read": name == "Read" and isinstance(file_path, str)
                                     and file_path.replace("\\", "/").endswith("references/child-agents.md"),
@@ -375,6 +418,7 @@ def load_log(path):
                 marker = re.match(r"\AEJA_DELEGATION_GUARD:([0-9a-f-]{36})\n", event["result"]["output"])
                 result["guard_marker"] = marker.group(1) if marker else None
                 result["parent_uuid"] = event.get("parentUuid") if isinstance(event.get("parentUuid"), str) else None
+                result["native_task"] = native_task
                 call = next((c for c in trace.calls if c["id"] == cid), None)
                 result["symbolic"] = bool(call and call.get("symbol_path") and not result["error"]
                                           and _symbol_result(event["result"]["output"], call["symbol_path"]))
@@ -506,7 +550,8 @@ def audit(trace, role, child_root=None, review_agents=(), guard_home=None, guard
             "manual_coverage": ["consent_semantics", "code_correctness", "shell_and_other_mutations",
                                 "natural_language_handoffs", "decision_table_meaning_and_order",
                                 "native_spec_kit_artifact_steps", "tdd_red_green", "child_applicable_phases",
-                                "source_authenticity_and_history_completeness"]}
+                                "source_authenticity_and_history_completeness",
+                                "review_report_completeness_parent_full_read_and_final_delivery"]}
 
 
 def _unverified(role, rule):

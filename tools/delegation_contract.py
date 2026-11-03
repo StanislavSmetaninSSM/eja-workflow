@@ -66,6 +66,32 @@ def absolute_path(value):
     return value
 
 
+def lexical_path(value):
+    """Validate a native absolute lexical path without filesystem access."""
+    absolute_path(value)
+    path = Path(value)
+    if (".." in path.parts or any(ord(c) < 32 for c in value)
+            or any(":" in part for part in path.parts[1:])):
+        raise ValueError("ambiguous path")
+    return path
+
+
+def _review_delivery(packet):
+    delivery = packet.get("result_delivery")
+    if delivery == "inline":
+        if (packet.get("write_roots") != [] or packet.get("result_artifact", "missing") is not None
+                or packet.get("artifact_unavailable_reason") != "user_forbids_writes"):
+            raise ValueError("inline review requires explicit no-write contract")
+    elif delivery == "artifact":
+        path = lexical_path(packet.get("result_artifact"))
+        roots = [lexical_path(root) for root in _texts(packet.get("write_roots"))]
+        if (path.suffix.lower() != ".md" or ".work" not in [p.lower() for p in path.parts]
+                or not any(path != root and path.is_relative_to(root) for root in roots)):
+            raise ValueError("review artifact must be a markdown file in permitted .work scratch")
+    else:
+        raise ValueError("review result delivery required")
+
+
 def parse_packet(prompt: str) -> dict:
     """Return a validated v1 envelope, or raise ValueError for structural failure."""
     try:
@@ -89,8 +115,12 @@ def parse_packet(prompt: str) -> dict:
             raise ValueError("unsupported handoff role")
         for field in ("original_request", "approved_contract", "approval_source"):
             _text(packet.get(field))
-        for field in ("canonical_artifacts", "write_roots", "verification"):
+        for field in ("canonical_artifacts", "verification"):
             _texts(packet.get(field))
+        if role == "review":
+            _review_delivery(packet)
+        else:
+            _texts(packet.get("write_roots"))
         for root in packet["write_roots"]:
             absolute_path(root)
         methodology, serena = packet.get("methodology"), packet.get("serena")

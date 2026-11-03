@@ -333,7 +333,7 @@ def _checkpoint(wire, call_id, scope, home=None, session=None):
     for finding in report["findings"]:
         if finding["rule"] == "evidence_complete":
             finding["rule"], finding["status"] = "checkpoint_prefix", "PASS"
-        elif finding["status"] == "UNVERIFIED":
+        elif finding["status"] == "UNVERIFIED" and finding["rule"] != "review_inline_delivery":
             finding["status"] = "FAIL"
     def loaded(skill, before=float("inf")):
         return any(c["name"] == "Skill" and c["skill"] == skill and trace.results.get(c["id"], {}).get("loaded_skill") == skill
@@ -451,6 +451,8 @@ def stop_hook(payload, root, home):
             wire = _safe_wire(scope, agent.name)
             trace = aw.load_log(wire)
             task_open, start = _open_task(wire)
+            if task_open and trace.assignment and trace.task_start_line == start:
+                active_work = True
             if task_open and any(c["code"] or c.get("code_read") or c.get("symbol_path")
                     or c["name"] in {"Agent", "AgentSwarm", "Bash"}
                     or c["skill"] in set(aw.IMPLEMENTATION.values()) | aw.EXECUTION for c in trace.calls if c["line"] > start):
@@ -466,7 +468,12 @@ def stop_hook(payload, root, home):
             "не выдумывай согласие, RED или новый план, не переписывай продукт ради истории. "
             "При FAIL/UNVERIFIED обработай причину и выполни один next_action recheck из отчёта. "
             "Поздние исправления сохраняют исходный FAIL; необратимый порядок не пересоздавай. "
-            "Не публикуй отдельное сообщение аудита в чате и не используй conversations.send; обычный итог задачи достаточен.\n" + command)
+            "Финальный ответ должен самостоятельно доставить исходный результат задачи: находки, решения, проверки, "
+            "открытые вопросы и ссылки на артефакты. Сохрани содержательность прежнего результата; фраза «см. выше» "
+            "и отдельная сводка аудита его не заменяют: приложение возвращает родителю только последний ответ. "
+            "Ревьюер обновляет полный result_artifact в ранее разрешённом scratch; при запрете записей возвращает полный отчёт inline. "
+            "Статус ограниченной проверки процесса сопровождает результат, не доказывает всё соблюдение. "
+            "Не отправляй служебных пользовательских сообщений и не используй conversations.send.\n" + command)
     except (OSError, ValueError, KeyError, TypeError):
         return {}
 

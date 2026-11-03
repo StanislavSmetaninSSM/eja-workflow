@@ -28,6 +28,8 @@ def make_packet(role="review", **changes):
               "serena": {"status": "ready", "project": str(ROOT), "server": "serena",
                          "languages": ["python"], "evidence": "find_symbol: example.py/example"},
               "contract_review": (ROOT / "skills/eja-workflow/references/contract-review.md").read_text(encoding="utf8")}
+    if role == "review":
+        packet.update(result_delivery="artifact", result_artifact=str(ROOT / ".work/review/report.md"))
     if role == "implementation":
         packet["methodology"]["phase_skills"] += ["superpowers:executing-plans", "superpowers:test-driven-development"]
     packet.update(changes)

@@ -4,7 +4,7 @@
 
 Personal task-methodology plugin for **Kimi Work desktop**: Superpowers, Spec Kit, their bridge, Serena and independent review. Technical plugin id: `eja-workflow`.
 
-**Local experimental 0.11.0 candidate; frozen native diagnostic acceptance pending.** Safe private main 0.9.1 remains the fallback. The previous0.10.3 Swarm review proved two custom profiles and automatic late audit correction, with ordering/Serena failures retained.
+**Local experimental 0.11.1 candidate; frozen native diagnostic acceptance pending.** Safe private main 0.9.1 remains the fallback. The previous0.10.3 Swarm review proved two custom profiles and automatic late audit correction, with ordering/Serena failures retained.
 
 **Private preview.** Instructions and observed use are distinct. This plugin does not guarantee automatic compliance or technically enforce every workflow transition. The tested delivery path is Windows / Kimi Work 3.2.24.27.
 
@@ -33,7 +33,7 @@ In the tested Work build, the engine disables ordinary plugin sessionStart/syste
 
 A real native Agent call confirmed the custom child system body and the exclusion of Agent/AgentSwarm. A focused read-only approval review loaded its own entry skills and identified the approved clause correctly. This does not establish all-phase adherence. Parent routing and receipt checks remain model behavior. AgentSwarm fan-out has not been live-validated for this plugin; native auto mode is preserved.
 
-The standalone auditor requires both the completed kernel task and the completed agent run. This candidate contains an experimental [internal Stop audit](docs/internal-audit.md): Stop and fixed-auditor Bash binding, plus two opt-in delegation matchers. No UserPromptSubmit, sessionStart, AGENTS setup, global override or external chat reports. Earlier native audit/correction/recheck and a no-injected-user-message outcome were observed, with methodology failures;0.11.0's new candidate still needs its own frozen tests. Eligibility can miss unsupported/unflushed work, including documentation-only or read-only tasks without qualifying calls. Verification now checks successful instruction-result order and a subsequent successful shell check after code writes; recognized nonempty find_symbol results provide bounded per-actor Serena evidence, not proof of correct active project or semantic correctness. Overall automatic-methodology acceptance remains unmet. Recheck capabilities after Work updates.
+The standalone auditor requires both the completed kernel task and the completed agent run. This candidate contains an experimental [internal Stop audit](docs/internal-audit.md): Stop and fixed-auditor Bash binding, plus two opt-in delegation matchers. No UserPromptSubmit, sessionStart, AGENTS setup, global override or external chat reports. Earlier native audit/correction/recheck and a no-injected-user-message outcome were observed, with methodology failures;0.11.1's output-preservation candidate still needs its own frozen tests. Eligibility can miss unsupported/unflushed work, including documentation-only or read-only tasks without qualifying calls. Verification now checks successful instruction-result order and a subsequent successful shell check after code writes; recognized nonempty find_symbol results provide bounded per-actor Serena evidence, not proof of correct active project or semantic correctness. Overall automatic-methodology acceptance remains unmet. Recheck capabilities after Work updates.
 
 ## Repository scope
 
@@ -44,3 +44,5 @@ License status: **UNLICENSED**. A public-release license has not been selected.
 ---
 
 **По-русски:** установите Eja Workflow через Plugin Builder и раздел личных плагинов. Для рабочей задачи явно вызовите `eja-workflow:eja-workflow`. В этом локальном кандидате проверяется внутренний аудит через Stop и точную привязку его команды. Стартовый UserPromptSubmit удалён: он добавлял служебный текст в видимое сообщение пользователя. Живая проверка нового кандидата ещё не пройдена. Плагин содержит методологию, профиль и аудитор; строгий автоматический режим пока не достигнут.
+
+Review delivery in0.11.1 preserves the original task result after internal Stop. Review packets normally name an already permitted absolute .work Markdown report; the child persists it and the parent reads it in full. An explicit user prohibition on writes uses inline delivery. Bounded native assignment/write evidence does not prove report completeness or end-to-end delivery. The completed0.11.0 AM case passed24independent product controls and ordered phase/Serena checks, but lost its first full review in the native latest-message return and commissioned a second review; it remains a failed delivery observation.
