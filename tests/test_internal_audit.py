@@ -109,13 +109,29 @@ class InternalAuditTests(unittest.TestCase):
         for code in (False, True):
             ticket = self.issue()
             _, command = self.bind(ticket)
-            _, wire = self.pending(command, "agent-43", skills=(ENTRY, USING, VERIFY), code=code)
+            skills = (ENTRY, USING, VERIFY, "speckit-implement") if code else (ENTRY, USING, VERIFY)
+            _, wire = self.pending(command, "agent-43", skills=skills, code=code)
             report = ia.check_ticket(ticket, "check", self.root, self.home, wait_seconds=0)
             failed = {f["rule"] for f in report["findings"] if f["status"] == "FAIL"}
             self.assertEqual("execution_before_code" in failed, code)
             self.assertEqual("tdd_before_code" in failed, code)
             self.assertNotIn("plan", failed)
             self.assertEqual(report["formal_status"], "FAIL" if code else "PASS")
+
+    def test_code_probe_without_implementation_evidence_keeps_role_unverified(self):
+        ticket = self.issue()
+        _, command = self.bind(ticket)
+        journal, _ = self.pending(command, skills=(ENTRY, USING, VERIFY), code=True)
+        own_call, stop = journal.rows.pop(), journal.rows.pop()
+        journal.call("Bash", {"command": "node --test"}, "review probe passed")
+        journal.rows.extend((stop, own_call))
+        self.write(journal)
+        report = ia.check_ticket(ticket, "check", self.root, self.home, wait_seconds=0)
+        self.assertEqual(report["formal_status"], "UNVERIFIED")
+        self.assertEqual(report["role"], "observed_code_writes_role_unverified")
+        self.assertIn({"rule": "code_write_role_applicability", "status": "UNVERIFIED", "evidence": []}, report["findings"])
+        self.assertFalse(any(f["rule"] in {"execution_before_code", "tdd_before_code"} for f in report["findings"]))
+        self.assertEqual(ia._recovery({"formal_status": "FAIL"}, report, self.wire, "audit-call"), "UNRESOLVED")
 
     def test_other_pending_tool_or_unknown_evidence_does_not_pass(self):
         for extra in ("pending", "unknown"):
@@ -332,6 +348,116 @@ class InternalAuditTests(unittest.TestCase):
             self.write(j)
             result = ia.check_ticket(ticket, "check", self.root, self.home, wait_seconds=0)
             self.assertEqual(result["formal_status"], "UNVERIFIED")
+
+    def native_activation(self, journal, skill, message_id):
+        """Append the observed native model-tool Skill steering sequence."""
+        journal.skill(skill)
+        call_row, result_row = journal.rows[-2:]
+        call_row["agentId"] = result_row["agentId"] = "main"
+        call_row["event"].update(uuid="call-" + message_id, turnId="0")
+        result_row["event"]["parentUuid"] = "call-" + message_id
+        journal.rows.insert(-1, {"type": "prompt.steered", "agentId": "main",
+            "activePromptId": "active-0", "messageId": message_id,
+            "promptIds": [message_id], "content": "PRIVATE_SKILL_BODY"})
+        origin = {"kind": "skill_activation", "trigger": "model-tool", "inTurn": True,
+                  "activationId": "activation-" + message_id, "skillName": skill,
+                  "skillPath": str(self.root / "skills" / "SKILL.md"), "skillSource": "extra"}
+        journal.rows.append({"type": "context.append_message", "agentId": "main", "message": {
+            "role": "user", "id": message_id, "origin": dict(origin),
+            "content": [{"type": "text", "text": "PRIVATE_SKILL_BODY"}]}})
+        journal.rows.append({"type": "turn.steer", "agentId": "main", "turnId": 0,
+            "messageId": message_id, "promptIds": [message_id], "origin": dict(origin),
+            "input": "PRIVATE_SKILL_BODY"})
+
+    def native_recovery(self, mutate=None):
+        """Exercise real Stop/check/activation/recheck without an injected user turn."""
+        ticket = self.issue()
+        _, command = self.bind(ticket)
+        journal, _ = self.pending(command, skills=())
+        for row in journal.rows:
+            if row.get("type") == "turn.prompt":
+                row.update(agentId="main", promptId="active-0")
+        self.write(journal)
+        original = ia.check_ticket(ticket, "check", self.root, self.home, wait_seconds=0)
+        original_bytes = ia.report_path(self.home, ticket, "check").read_bytes()
+        journal.event({"type": "tool.result", "toolCallId": "audit-call", "result": {"output": "report"}})
+        for number, skill in enumerate((ENTRY, USING, VERIFY)):
+            self.native_activation(journal, skill, "skill-" + str(number))
+        journal.call("Bash", {"command": "node --test"}, "fresh verification")
+        if mutate:
+            mutate(journal.rows)
+        _, command = self.bind(ticket, "recheck", "recheck-call")
+        journal.event({"type": "tool.call", "toolCallId": "recheck-call", "name": "Bash",
+                       "args": {"command": command}, "turnId": "0"})
+        self.write(journal)
+        result = ia.check_ticket(ticket, "recheck", self.root, self.home, wait_seconds=0)
+        self.assertEqual(ia.report_path(self.home, ticket, "check").read_bytes(), original_bytes)
+        return original, result
+
+    def test_model_tool_skill_steering_allows_bound_recovery_without_erasing_failure(self):
+        original, recovered = self.native_recovery()
+        self.assertEqual(original["formal_status"], "FAIL")
+        self.assertEqual(recovered.get("original_formal_status"), "FAIL")
+        self.assertEqual(recovered.get("recovery_status"), "FORMAL_RECOVERED_LATE")
+        self.assertEqual(recovered["formal_status"], "FAIL")  # First entry is still historically late.
+        self.assertNotIn("PRIVATE", json.dumps(recovered))
+
+    def test_unsupported_skill_steering_cannot_bypass_user_or_identity_guards(self):
+        def change(rows, field, value):
+            for row in rows:
+                if row.get("type") == "prompt.steered":
+                    row[field] = value
+                    return
+
+        def change_origin(rows):
+            for row in rows:
+                origin = row.get("origin") or row.get("message", {}).get("origin")
+                if isinstance(origin, dict) and origin.get("kind") == "skill_activation":
+                    origin["trigger"] = "user-slash"
+
+        def remove_context(rows):
+            for number, row in enumerate(rows):
+                if row.get("message", {}).get("origin", {}).get("kind") == "skill_activation":
+                    rows.pop(number)
+                    return
+
+        def wrong_parent(rows):
+            for row in rows:
+                event = row.get("event", {})
+                if "parentUuid" in event:
+                    event["parentUuid"] = "unrelated-call"
+                    return
+
+        def duplicate_activation(rows):
+            for row in rows:
+                origin = row.get("origin") or row.get("message", {}).get("origin")
+                if isinstance(origin, dict) and origin.get("kind") == "skill_activation":
+                    origin["activationId"] = "same-activation"
+
+        def wrong_kernel(rows):
+            next(row for row in rows if row.get("type") == "turn.steer")["turnId"] = 1
+
+        def malformed_result_turn(rows):
+            next(row["event"] for row in rows if "parentUuid" in row.get("event", {}))["turnId"] = True
+
+        def bad_origin_metadata(rows, key, value):
+            for row in rows:
+                origin = row.get("origin") or row.get("message", {}).get("origin")
+                if isinstance(origin, dict) and origin.get("kind") == "skill_activation":
+                    origin[key] = value
+
+        for label, mutate in (("wrong_prompt", lambda rows: change(rows, "activePromptId", "another-task")),
+                ("mixed_inputs", lambda rows: change(rows, "promptIds", ["skill-0", "user-input"])),
+                ("user_slash", change_origin), ("missing_context", remove_context),
+                ("unrelated_result", wrong_parent), ("duplicate_activation", duplicate_activation),
+                ("different_kernel", wrong_kernel),
+                ("malformed_result_turn", malformed_result_turn),
+                ("unknown_origin_field", lambda rows: bad_origin_metadata(rows, "future", True)),
+                ("malformed_origin_path", lambda rows: bad_origin_metadata(rows, "skillPath", []))):
+            with self.subTest(label=label):
+                _, result = self.native_recovery(mutate)
+                self.assertEqual(result["formal_status"], "UNVERIFIED")
+                self.assertNotEqual(result.get("recovery_status"), "FORMAL_RECOVERED_LATE")
 
     def test_native_stop_reentry_uses_kernel_prompt_not_actor_turn(self):
         ticket = self.issue()

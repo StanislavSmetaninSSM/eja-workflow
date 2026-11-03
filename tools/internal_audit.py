@@ -164,9 +164,88 @@ def _locate(scope, call_id, command):
     return matches
 
 
+def _skill_steering(wire, records, turn_id, prompt_id):
+    """Allow only correlated native model-tool Skill activations, without payloads."""
+    if not records:
+        return
+    agent = wire.parent.name
+    trace = aw.load_log(wire)
+    pending = None
+    used_messages, used_activations, used_calls = set(), set(), set()
+    calls = [r for r in records if r["kind"] == "tool.call"]
+    results = [r for r in records if r["kind"] == "tool.result"]
+    origin_keys = {"kind", "trigger", "inTurn", "activationId", "skillName"}
+    optional_origin_keys = {"skillPath", "skillSource"}
+
+    def origin_valid(origin):
+        return (isinstance(origin, dict) and origin_keys <= set(origin) <= origin_keys | optional_origin_keys
+            and origin["kind"] == "skill_activation" and origin["trigger"] == "model-tool"
+            and origin["inTurn"] is True and isinstance(origin["activationId"], str)
+            and bool(origin["activationId"]) and isinstance(origin["skillName"], str)
+            and bool(origin["skillName"]) and all(isinstance(origin[key], str) and bool(origin[key])
+                for key in optional_origin_keys if key in origin))
+
+    for row in records:
+        kind = row["kind"]
+        if kind == "prompt.steered":
+            mid = row.get("messageId")
+            if (pending is not None or not isinstance(mid, str) or not mid or mid in used_messages
+                    or row.get("promptIds") != [mid] or row.get("agent") != agent
+                    or not isinstance(prompt_id, str) or not prompt_id
+                    or row.get("activePromptId") != prompt_id):
+                raise ValueError("skill_steering_ambiguous")
+            pending = {"event": row, "message": None}
+        elif kind == "skill.message":
+            if (pending is None or pending["message"] is not None or row.get("role") != "user"
+                    or row.get("messageId") != pending["event"]["messageId"]
+                    or row.get("agent") != agent or not origin_valid(row.get("origin"))):
+                raise ValueError("skill_steering_origin")
+            pending["message"] = row
+        elif kind == "turn.steer":
+            message = pending["message"] if pending else None
+            event = pending["event"] if pending else None
+            if (message is None or row.get("agent") != agent
+                    or row.get("messageId") != event["messageId"]
+                    or row.get("promptIds") != [event["messageId"]]
+                    or aw.canonical_turn_id(row.get("turnId")) != turn_id
+                    or not origin_valid(row.get("origin")) or row["origin"] != message["origin"]):
+                raise ValueError("work_unit_steered")
+            activation = row["origin"]["activationId"]
+            skill = row["origin"]["skillName"]
+            if activation in used_activations:
+                raise ValueError("skill_steering_duplicate")
+            matches = []
+            for call in calls:
+                loaded = [c for c in trace.calls if c["id"] == call.get("id")
+                          and c["name"] == "Skill" and c["skill"] == skill and c["line"] == call["line"]]
+                paired = [r for r in results if r.get("id") == call.get("id")]
+                if len(loaded) != 1 or len(paired) != 1:
+                    continue
+                result = paired[0]
+                proof = trace.results.get(call["id"], {})
+                if (call["line"] < event["line"] < result["line"] < message["line"] < row["line"]
+                        and call.get("agent") == result.get("agent") == agent
+                        and isinstance(call.get("uuid"), str) and bool(call["uuid"])
+                        and result.get("parentUuid") == call["uuid"]
+                        and aw.canonical_turn_id(call.get("turnId")) == turn_id
+                        and ("turnId" not in result or aw.canonical_turn_id(result["turnId"]) == turn_id)
+                        and proof.get("line") == result["line"] and not proof.get("error")
+                        and proof.get("loaded_skill") == skill):
+                    matches.append(call["id"])
+            if len(matches) != 1 or matches[0] in used_calls:
+                raise ValueError("skill_steering_correlation")
+            used_calls.add(matches[0])
+            used_messages.add(event["messageId"])
+            used_activations.add(activation)
+            pending = None
+    if pending is not None:
+        raise ValueError("skill_steering_incomplete")
+
+
 def _scope(wire, call_id, stop_command):
     """Bind to a kernel task; Stop can start another actor run inside that task."""
-    active, start, stops, found = None, 0, [], None
+    active, prompt_id, start, stops, found = None, None, 0, [], None
+    steering = []
     for number, row in _records(wire):
         if not isinstance(row, dict):
             raise ValueError("boundary_unsupported")
@@ -175,12 +254,14 @@ def _scope(wire, call_id, stop_command):
             if found:
                 raise ValueError("work_unit_changed")
             active = aw.canonical_turn_id(row.get("turnId")) if kind == "turn.prompt" else None
+            prompt_id = row.get("promptId") if kind == "turn.prompt" else None
             start, stops = number, []
+            steering = []
         message = row.get("message")
         origin = message.get("origin", {}) if isinstance(message, dict) else {}
         if not isinstance(origin, dict):
             raise ValueError("origin_unsupported")
-        if stops and (kind in {"prompt.steered", "turn.steer"} or origin.get("kind") == "user"):
+        if stops and origin.get("kind") == "user":
             raise ValueError("work_unit_steered")
         if (kind == "context.append_message" and isinstance(message, dict) and message.get("role") == "user"
                 and origin == {"kind": "system_trigger", "name": "stop_hook"}
@@ -189,13 +270,26 @@ def _scope(wire, call_id, stop_command):
                     and stop_command in p["text"] for p in message["content"])):
             stops.append(number)
         event = row.get("event")
+        if stops:
+            base = {"line": number, "agent": row.get("agentId")}
+            if kind in {"prompt.steered", "turn.steer"}:
+                steering.append({**base, "kind": kind, **{key: row.get(key) for key in
+                    ("messageId", "promptIds", "activePromptId", "turnId", "origin")}})
+            elif kind == "context.append_message" and origin.get("kind") == "skill_activation":
+                steering.append({**base, "kind": "skill.message", "messageId": message.get("id"),
+                    "role": message.get("role"), "origin": origin})
+            elif kind == "context.append_loop_event" and isinstance(event, dict):
+                if event.get("type") == "tool.result" or (event.get("type") == "tool.call" and event.get("name") == "Skill"):
+                    steering.append({**base, "kind": event["type"], "id": event.get("toolCallId"),
+                        **{key: event[key] for key in ("uuid", "parentUuid", "turnId") if key in event}})
         if kind == "context.append_loop_event" and isinstance(event, dict) and event.get("type") == "tool.call" and event.get("toolCallId") == call_id:
             if (not isinstance(active, int) or isinstance(active, bool) or len(stops) != 1
                     or ("turnId" in event and aw.canonical_turn_id(event["turnId"]) != active)):
                 raise ValueError("stop_origin_unavailable")
             found = {"turn_id": active, "start_line": start, "stop_line": stops[0]}
-    if found is None:
+    if found is None or len(stops) != 1:
         raise ValueError("stop_origin_unavailable")
+    _skill_steering(wire, steering, found["turn_id"], prompt_id)
     return found
 
 
@@ -229,7 +323,7 @@ def _checkpoint(wire, call_id, scope):
     view = replace(trace, calls=trace.calls[:-1], issues=[])
     current_calls = [c for c in view.calls if c["line"] > scope["start_line"]]
     report = aw.audit(view, "reviewer")
-    report["role"] = "observed_executor" if any(c["code"] for c in current_calls) else "observed_review_or_coordination"
+    report["role"] = "observed_review_or_coordination"
     for finding in report["findings"]:
         if finding["rule"] == "evidence_complete":
             finding["rule"], finding["status"] = "checkpoint_prefix", "PASS"
@@ -245,9 +339,18 @@ def _checkpoint(wire, call_id, scope):
             finding["status"] = "PASS" if loaded(aw.ENTRY, entry_limit) else "FAIL"
     code = [c["line"] for c in current_calls if c["code"]]
     if code:
-        for rule, ok in [("execution_before_code", any(loaded(s, min(code)) for s in aw.EXECUTION)),
-                         ("tdd_before_code", loaded(aw.IMPLEMENTATION["tdd"], min(code)))]:
-            report["findings"].append({"rule": rule, "status": "PASS" if ok else "FAIL", "evidence": []})
+        markers = aw.EXECUTION | {aw.IMPLEMENTATION["implement"]}
+        implementation = any(c["name"] == "Skill" and c["skill"] in markers
+            and trace.results.get(c["id"], {}).get("loaded_skill") == c["skill"]
+            and not trace.results[c["id"]]["error"] for c in current_calls)
+        if implementation:
+            report["role"] = "observed_executor"
+            for rule, ok in [("execution_before_code", any(loaded(s, min(code)) for s in aw.EXECUTION)),
+                             ("tdd_before_code", loaded(aw.IMPLEMENTATION["tdd"], min(code)))]:
+                report["findings"].append({"rule": rule, "status": "PASS" if ok else "FAIL", "evidence": []})
+        else:
+            report["role"] = "observed_code_writes_role_unverified"
+            report["findings"].append({"rule": "code_write_role_applicability", "status": "UNVERIFIED", "evidence": []})
         fresh = any(c["name"] == "Bash" and c["line"] > max(code) and c["id"] in trace.results
             and not trace.results[c["id"]]["error"] for c in current_calls)
         report["findings"].append({"rule": "fresh_verification_evidence", "status": "PASS" if fresh else "FAIL", "evidence": []})

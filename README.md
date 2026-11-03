@@ -4,7 +4,7 @@
 
 Personal task-methodology plugin for **Kimi Work desktop**: Superpowers, Spec Kit, their bridge, Serena and independent review. Technical plugin id: `eja-workflow`.
 
-**Local experimental 0.10.1 candidate; native acceptance pending.** Safe private main 0.9.1 remains the fallback.
+**Local experimental 0.10.2 candidate; native acceptance pending.** Safe private main 0.9.1 remains the fallback.
 
 **Private preview.** Instructions and observed use are distinct. This plugin does not guarantee automatic compliance or technically enforce every workflow transition. The tested delivery path is Windows / Kimi Work 3.2.24.27.
 
