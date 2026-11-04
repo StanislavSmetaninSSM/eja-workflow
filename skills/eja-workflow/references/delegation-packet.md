@@ -19,7 +19,7 @@ EJA_HANDOFF_V1
     "entry": "eja-workflow:eja-workflow",
     "using": "superpowers:using-superpowers",
     "child_guide": "C:/installed-plugin/skills/eja-workflow/references/child-agents.md",
-    "phase_skills": ["superpowers:executing-plans", "superpowers:test-driven-development", "superpowers:verification-before-completion"]
+    "phase_skills": ["spec-kit-superpowers-bridge", "superpowers:executing-plans", "superpowers:test-driven-development", "superpowers:verification-before-completion"]
   },
   "serena": {
     "status": "ready",
@@ -33,7 +33,7 @@ END_EJA_HANDOFF
 Выполни только назначенные task ID; сохрани прочие модули. Верни diff, проверки и пропуски.
 ```
 
-Роли: implementation, review, investigation. У review обязательны phase_skills с verification-before-completion и поле contract_review с **полным текущим текстом** установленного references/contract-review.md, прочитанным через Read; упоминание пути или пересказ не подходит. Для read-only без Spec Kit документов canonical_artifacts содержит явную причину неприменимости. Ревьюер применяет роль ревью, не запускает реализацию ради записи scratch.
+Роли: implementation, review, investigation. У implementation обязательно укажи execution и TDD; ребёнок вызывает их сам до реализации, включая записи через Serena/Bash. Родительская execution не считается дочерней. У review обязательны phase_skills с verification-before-completion и contract_review_ref: прочитай установленный references/contract-review.ref.json и скопируй его короткий объект version/sha256 без изменений. Полный протокол детерминированно включён в собственный профиль; ребёнок ещё читает актуальный contract-review.md через Read до проверяемых файлов/команд. Ссылка сама по себе не является чтением. Legacy contract_review с полным текущим текстом поддерживается как альтернативное поле, не вместе с reference. Для read-only без Spec Kit документов canonical_artifacts содержит явную причину неприменимости. Ревьюер применяет роль ревью, не запускает реализацию ради записи scratch.
 
 Все списки непусты, кроме явно запрещённых корней записи review inline; строки содержательны; корни записи, проект Serena и child_guide абсолютные. Неизвестную готовность не обозначай ready: status unavailable требует точной ошибки и зависимой фазы в evidence, сама недоступность не разрешает пропуск работы с кодом. У ребёнка всё равно нужен собственный успешный find_symbol в настоящем файле. JSON-пакет доказывает полноту формы, не истинность утверждений и не соблюдение процесса.
 
@@ -48,3 +48,5 @@ Guard необязателен и не меняет параметры вызо�
 Если пользователь прямо запретил записи, используй result_delivery="inline", result_artifact=null, write_roots=[] и artifact_unavailable_reason="user_forbids_writes". Фактический запрет отражается в approval_source/approved_contract; это утверждение проверяется вручную. Размер задачи и удобство не являются исключением. Последнее сообщение должно содержать полный самостоятельный отчёт.
 
 После внутреннего Stop финальный ответ сохраняет находки, доказательства, решения и путь результата: родителю доставляется только последнее сообщение. Автоаудит связывает роль/назначение только с текущим native turn.prompt дочернего агента; успешная запись точного пути с парой call UUID/result parentUuid — свидетельство действия, а не полноты текста или прочтения родителем. Старый файл и предыдущая задача не дают кредит. Новый формат обязателен для review; implementation/investigation сохраняют прежнюю форму.
+
+Минимальное native-объявление implementation устанавливает только намерение роли, даже если phase_skills неполон: оно не создаёт готовность, согласие или права. Аудитор потребует действительные собственные execution/TDD/bridge до наблюдаемой записи либо первого возврата. Для review актуальное успешное полное Read с совпадающими actor/turn/call UUID/result parentUuid предшествует наблюдаемой работе. Содержательность проверок и разрешений остаётся независимой проверкой.

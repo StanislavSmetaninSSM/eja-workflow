@@ -167,8 +167,11 @@ def _validate_prompt(prompt):
         if len(raw) > 65536:
             raise ValueError("review protocol unavailable")
         expected = raw.decode("utf8").replace("\r\n", "\n").strip()
-        actual = packet["contract_review"].replace("\r\n", "\n")
-        if not expected or expected not in actual:
+        actual = packet.get("contract_review", "").replace("\r\n", "\n")
+        reference = packet.get("contract_review_ref")
+        matches = (reference["sha256"] == hashlib.sha256(expected.encode("utf8")).hexdigest()
+                   if reference else expected in actual)
+        if not expected or not matches:
             raise ValueError("full installed review protocol required")
 
 

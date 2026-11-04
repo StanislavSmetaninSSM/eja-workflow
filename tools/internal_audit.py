@@ -1,11 +1,13 @@
 """Scoped internal Stop audit. No network, user-message delivery or product writes."""
 import argparse
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import time
 import uuid
 
@@ -90,6 +92,72 @@ def _deny(reason):
     return {"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": reason}}
 
 
+@contextmanager
+def _phase_guard(home, ticket, phase):
+    """Serialize own binding/repair publication without waiting on other calls."""
+    path = ticket_path(home, ticket).with_suffix("." + phase + ".lock")
+    if path.resolve() != path:
+        raise ValueError("redirected_phase_lock")
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+    try:
+        yield
+    finally:
+        path.unlink()
+
+
+def _publish_repair(path, value):
+    """Publish a complete private receipt atomically, without replacing a file."""
+    if path.resolve() != path:
+        raise ValueError("redirected_repair")
+    descriptor, temporary = tempfile.mkstemp(prefix=".repair-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf8", newline="\n") as stream:
+            json.dump(value, stream, ensure_ascii=False, sort_keys=True)
+            stream.write("\n")
+        os.link(temporary, path)
+    finally:
+        Path(temporary).unlink()
+
+
+def _repair_invocation(payload, root, home, command):
+    """Suggest one literal repair only for an unambiguous live unused own phase."""
+    identities = set(re.findall(r'\b(check|recheck) --ticket ([a-f0-9-]{36}) --home "([^"\r\n]+)"', command))
+    if len(identities) != 1:
+        return None
+    phase, ticket, declared_home = identities.pop()
+    literal = audit_command(root, ticket, phase, home)
+    if command == literal or Path(declared_home).resolve() != Path(home).resolve():
+        return None  # A used/foreign literal is not a formatting error.
+    value = _ticket(home, root, ticket)
+    call = payload.get("tool_call_id")
+    cwd = payload.get("cwd")
+    if (payload.get("session_id") != value["session_id"]
+            or not isinstance(call, str) or not 0 < len(call) <= 512 or "\0" in call
+            or not isinstance(cwd, str) or not Path(cwd).is_absolute()
+            or Path(cwd).resolve() != Path(value["workspace"]).resolve()):
+        return None
+    if phase == "recheck":
+        _original_report(home, ticket)
+    with _phase_guard(home, ticket, phase):
+        binding = ticket_path(home, ticket).with_suffix("." + phase + ".binding.json")
+        if binding.exists() or report_path(home, ticket, phase).exists():
+            return None
+        receipt = ticket_path(home, ticket).with_suffix("." + phase + ".repair.json")
+        expected = {"schema_version": 1, "session_id": value["session_id"], "tool_call_id": call,
+                    "phase": phase, "reason": "invocation_format"}
+        if receipt.exists():
+            previous = _read(receipt)
+            if previous != expected or type(previous.get("schema_version")) is not int:
+                return None
+        else:
+            _publish_repair(receipt, expected)
+    return _deny("EJA_AUDIT_REPAIR: неверная форма собственного вызова; команда не выполнялась. "
+                 "Доступно одно исправление формы для этой фазы. Выполни ровно последнюю строку, "
+                 "без перенаправления, повтора, оболочки или дополнительных команд. "
+                 "Это не новое согласие и не изменение срока ticket.\n" + literal)
+
+
 def bind_call(payload, root, home):
     """Bind only our fixed audit invocation. Never run or log arbitrary shell text."""
     if payload.get("tool_name") != "Bash" or not isinstance(payload.get("tool_input"), dict):
@@ -110,12 +178,21 @@ def bind_call(payload, root, home):
         if (command != audit_command(root, ticket, phase, home) or payload.get("session_id") != value["session_id"]
                 or not isinstance(payload.get("tool_call_id"), str) or not payload["tool_call_id"]):
             raise ValueError("binding_invalid")
-        if phase == "recheck" and not report_path(home, ticket, "check").exists():
-            raise ValueError("original_missing")
-        binding = ticket_path(home, ticket).with_suffix("." + phase + ".binding.json")
-        _write_new(binding, {"tool_call_id": payload["tool_call_id"], "session_id": value["session_id"]})
+        if phase == "recheck":
+            _original_report(home, ticket)
+        with _phase_guard(home, ticket, phase):
+            if report_path(home, ticket, phase).exists():
+                raise ValueError("phase_consumed")
+            binding = ticket_path(home, ticket).with_suffix("." + phase + ".binding.json")
+            _write_new(binding, {"tool_call_id": payload["tool_call_id"], "session_id": value["session_id"]})
         return {}
     except (OSError, ValueError, KeyError, TypeError):
+        try:
+            repair = _repair_invocation(payload, root, home, command)
+            if repair:
+                return repair
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         return _deny("Eja Workflow: собственный вызов аудитора не связан с действующим уникальным ticket; не выполняй его повторно или через оболочку.")
 
 
@@ -313,14 +390,46 @@ def _open_task(wire):
     return active is not None, start
 
 
-def _unknown(reason):
+def _audit_available(report):
+    availability = report.get("audit_availability")
+    return availability is None or (isinstance(availability, dict) and availability.get("status") == "AVAILABLE")
+
+
+def _original_report(home, ticket):
+    """Require a supported own checkpoint report before binding or repairing recheck."""
+    report = _read(report_path(home, ticket, "check"))
+    scope = report.get("scope")
+    findings = report.get("findings")
+    statuses = {"PASS", "FAIL", "UNVERIFIED"}
+    if (type(report.get("schema_version")) is not int or report["schema_version"] != 1
+            or report.get("formal_status") not in statuses or report.get("workflow_status") != "NOT_PROVEN"
+            or not isinstance(report.get("role"), str) or not report["role"]
+            or not isinstance(report.get("agent_id"), str) or not re.fullmatch(r"main|agent-[0-9]+", report["agent_id"])
+            or report.get("boundary") != "pre_completion_tool" or report.get("task_completion") != "PENDING"
+            or not isinstance(scope, dict) or any(type(scope.get(k)) is not int for k in ("turn_id", "start_line", "stop_line"))
+            or scope["turn_id"] < 0 or not 0 < scope["start_line"] < scope["stop_line"]
+            or not isinstance(findings, list) or not findings
+            or any(not isinstance(f, dict) or not isinstance(f.get("rule"), str) or not f["rule"]
+                   or f.get("status") not in statuses or not isinstance(f.get("evidence"), list) for f in findings)
+            or not isinstance(report.get("manual_coverage"), list)
+            or any(not isinstance(item, str) for item in report["manual_coverage"])
+            or not _audit_available(report)):
+        raise ValueError("original_unavailable")
+    return report
+
+
+def _unknown(reason, availability="identity_unavailable"):
     return {"schema_version": 1, "formal_status": "UNVERIFIED", "workflow_status": "NOT_PROVEN",
+        "audit_availability": {"status": "UNAVAILABLE", "reason": availability},
         "task_completion": "PENDING", "boundary": "pre_completion_tool", "findings": [
             {"rule": reason, "status": "UNVERIFIED", "evidence": []}], "manual_coverage": ["identity_or_prefix_unavailable"]}
 
 
 def _checkpoint(wire, call_id, scope, home=None, session=None):
     trace = aw.load_log(wire)
+    unavailable = aw.evidence_availability(trace)
+    if unavailable:
+        return _unknown("audit_evidence_unavailable", unavailable)
     pending = {c["id"] for c in trace.calls} - set(trace.results)
     if (not trace.has_metadata or not trace.has_prompt or trace.ended or pending != {call_id}
             or not trace.calls or trace.calls[-1]["id"] != call_id
@@ -346,14 +455,17 @@ def _checkpoint(wire, call_id, scope, home=None, session=None):
     code = [c["line"] for c in current_calls if c["code"]]
     if code:
         markers = aw.EXECUTION | {aw.IMPLEMENTATION["implement"]}
-        implementation = any(c["name"] == "Skill" and c["skill"] in markers
+        assigned = bool(view.assignment and view.assignment["role"] == "implementation")
+        implementation = assigned or any(c["name"] == "Skill" and c["skill"] in markers
             and trace.results.get(c["id"], {}).get("loaded_skill") == c["skill"]
             and not trace.results[c["id"]]["error"] for c in current_calls)
         if implementation:
-            report["role"] = "observed_executor"
-            for rule, ok in [("execution_before_code", any(loaded(s, min(code)) for s in aw.EXECUTION)),
-                             ("tdd_before_code", loaded(aw.IMPLEMENTATION["tdd"], min(code)))]:
-                report["findings"].append({"rule": rule, "status": "PASS" if ok else "FAIL", "evidence": []})
+            report["role"] = "observed_assigned_executor" if assigned else "observed_executor"
+            if not assigned:
+                for rule, ok in [("execution_before_code", any(loaded(s, min(code)) for s in aw.EXECUTION)),
+                                 ("tdd_before_code", loaded(aw.IMPLEMENTATION["tdd"], min(code))),
+                                 ("bridge_before_code", loaded("spec-kit-superpowers-bridge", min(code)))]:
+                    report["findings"].append({"rule": rule, "status": "PASS" if ok else "FAIL", "evidence": []})
         else:
             report["role"] = "observed_code_writes_role_unverified"
             report["findings"].append({"rule": "code_write_role_applicability", "status": "UNVERIFIED", "evidence": []})
@@ -363,6 +475,8 @@ def _checkpoint(wire, call_id, scope, home=None, session=None):
     if wire.parent.name == "main" and any(c["name"] == "Agent" for c in current_calls):
         child_view = replace(view, calls=[c for c in view.calls if c["name"] != "Agent" or c in current_calls])
         children = aw.audit(child_view, "implementation", guard_home=home, guard_session=session)
+        if children.get("audit_availability"):
+            report["audit_availability"] = children["audit_availability"]
         report["findings"].extend(f for f in children["findings"] if f["rule"].startswith("child_"))
         report["findings"].extend(f for f in children["findings"] if f["rule"] == "delegation_refused_before_execution")
     report["scope"] = scope
@@ -376,10 +490,14 @@ def _checkpoint(wire, call_id, scope, home=None, session=None):
         report["manual_coverage"].append("native_agent_swarm_lifecycle")
     statuses = {f["status"] for f in report["findings"]}
     report["formal_status"] = "FAIL" if "FAIL" in statuses else "UNVERIFIED" if "UNVERIFIED" in statuses else "PASS"
+    if not _audit_available(report):
+        report["formal_status"] = "UNVERIFIED"
     return report
 
 
 def _recovery(original, current, wire, first_call):
+    if not _audit_available(original) or not _audit_available(current):
+        return "UNAVAILABLE"
     if original["formal_status"] != "FAIL":
         return "NOT_APPLICABLE"
     if any(f["status"] == "UNVERIFIED" for f in current["findings"]):
@@ -426,13 +544,13 @@ def check_ticket(ticket, phase, root, home, wait_seconds=4):
         report = _checkpoint(wire, binding["tool_call_id"], work_scope, home, value["session_id"])
         report["agent_id"] = agent
         if phase == "recheck":
-            original = _read(report_path(home, ticket, "check"))
+            original = _original_report(home, ticket)
             first = _read(ticket_path(home, ticket).with_suffix(".check.binding.json"))
             if original.get("agent_id") != agent or original.get("scope") != work_scope:
                 raise ValueError("recheck_caller_changed")
             report["original_formal_status"] = original["formal_status"]
             report["recovery_status"] = _recovery(original, report, wire, first["tool_call_id"])
-        else:
+        elif _audit_available(report):
             report["next_action"] = audit_command(root, ticket, "recheck", home)
         _write_new(report_path(home, ticket, phase), report)
         return report
@@ -451,6 +569,11 @@ def stop_hook(payload, root, home):
             wire = _safe_wire(scope, agent.name)
             trace = aw.load_log(wire)
             task_open, start = _open_task(wire)
+            if task_open:
+                unavailable = aw.evidence_availability(trace)
+                if unavailable:
+                    print("Eja Workflow audit unavailable: " + unavailable, file=sys.stderr)
+                    return {}
             if task_open and trace.assignment and trace.task_start_line == start:
                 active_work = True
             if task_open and any(c["code"] or c.get("code_read") or c.get("symbol_path")
@@ -462,9 +585,15 @@ def stop_hook(payload, root, home):
         ticket = issue_ticket(payload, root, home)
         command = audit_command(root, ticket, "check", home)
         return _deny("Внутренний контроль Eja Workflow; это не сообщение/согласие пользователя. "
-            "Если текущая задача — обычный разговор или ожидает решения пользователя, заверши без новой реплики и без инженерных фаз. "
+            "Для обычного разговора верни обычный содержательный ответ. "
+            "При ожидании решения пользователя последний ответ целиком содержит сам вопрос, уже предложенные варианты, "
+            "контекст необходимого решения и ссылки на spec. Сохрани существенный текст вопроса в последнем ответе. "
+            "Ожидание решения не требует новых инженерных фаз или noop-команды. "
             "Для завершённой рабочей задачи вызови сейчас Bash ровно с командой ниже (сам, без делегирования/обёртки). "
             "Отчёт вернётся тебе как результат инструмента. Исправь применимые пропуски только в исходном согласованном объёме; "
+            "Если инструмент отклонил форму вызова с EJA_AUDIT_REPAIR, один раз выполни его точную последнюю строку. "
+            "При audit_availability.status=UNAVAILABLE сохрани исходный результат и заверши без recheck, "
+            "восстановления фаз, установки зависимостей или правок проекта/vendor/глобальных настроек ради аудита. "
             "не выдумывай согласие, RED или новый план, не переписывай продукт ради истории. "
             "При FAIL/UNVERIFIED обработай причину и выполни один next_action recheck из отчёта. "
             "Поздние исправления сохраняют исходный FAIL; необратимый порядок не пересоздавай. "
@@ -473,8 +602,10 @@ def stop_hook(payload, root, home):
             "и отдельная сводка аудита его не заменяют: приложение возвращает родителю только последний ответ. "
             "Ревьюер обновляет полный result_artifact в ранее разрешённом scratch; при запрете записей возвращает полный отчёт inline. "
             "Статус ограниченной проверки процесса сопровождает результат, не доказывает всё соблюдение. "
+            "Порядок последнего ответа: исходный результат/находки, проверки, открытые вопросы, затем краткая диагностика процесса. "
             "Не отправляй служебных пользовательских сообщений и не используй conversations.send.\n" + command)
     except (OSError, ValueError, KeyError, TypeError):
+        print("Eja Workflow audit unavailable: journal_unavailable", file=sys.stderr)
         return {}
 
 

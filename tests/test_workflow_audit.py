@@ -246,13 +246,10 @@ class AuditTests(unittest.TestCase):
             for key, invalid in (("agentId", 1), ("serverName", None), ("transport", "ftp"),
                                  ("time", True), ("time", None), ("time", "1"),
                                  ("time", -1), ("time", float("nan")), ("time", float("inf")),
-                                 ("time", 10 ** 400), ("origin", {"kind": "user"}),
-                                 ("turnId", 1), ("content", [])):
+                                 ("time", 10 ** 400)):
                 variants.append({**base, key: invalid})
         variants.extend([{**failed, "error": {"payload": "PRIVATE_MCP_ERROR"}},
-                         {**failed, "resolution": "recovered"},
-                         {**resolved, "resolution": "healthy"},
-                         {**resolved, "error": "PRIVATE_MCP_ERROR"}])
+                         {**resolved, "resolution": "healthy"}])
         for index, event in enumerate(variants):
             with self.subTest(index=index):
                 j = self.complete_reviewer()

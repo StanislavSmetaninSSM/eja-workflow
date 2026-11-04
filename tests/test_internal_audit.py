@@ -1,4 +1,5 @@
 """Internal feedback uses native tool routing, never a fabricated user message."""
+import concurrent.futures
 import importlib.util
 import json
 import os
@@ -214,7 +215,7 @@ class InternalAuditTests(unittest.TestCase):
 
     def test_actual_tool_cli_does_not_require_hook_only_environment(self):
         (self.root / "tools").mkdir()
-        for name in ("internal_audit.py", "audit_workflow.py", "delegation_contract.py", "delegation_guard.py"):
+        for name in ("internal_audit.py", "audit_workflow.py", "delegation_contract.py", "delegation_guard.py", "review_policy.py"):
             shutil.copy2(ROOT / "tools" / name, self.root / "tools" / name)
         ticket = self.issue()
         decision, command = self.bind(ticket)
@@ -234,7 +235,7 @@ class InternalAuditTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Native Windows hook transport")
     def test_manifest_stop_and_pretool_really_transfer_native_stdin(self):
         (self.root / "tools").mkdir()
-        for name in ("internal_audit.py", "audit_workflow.py", "delegation_contract.py", "delegation_guard.py"):
+        for name in ("internal_audit.py", "audit_workflow.py", "delegation_contract.py", "delegation_guard.py", "review_policy.py"):
             shutil.copy2(ROOT / "tools" / name, self.root / "tools" / name)
         j = Journal()
         j.rows.append({"type": "turn.prompt", "turnId": 0})
@@ -263,7 +264,7 @@ class InternalAuditTests(unittest.TestCase):
     def test_manifest_delegation_hooks_really_refuse_only_opted_in_calls(self):
         import delegation_guard as guard
         (self.root / "tools").mkdir()
-        for name in ("delegation_contract.py", "delegation_guard.py"):
+        for name in ("delegation_contract.py", "delegation_guard.py", "review_policy.py"):
             shutil.copy2(ROOT / "tools" / name, self.root / "tools" / name)
         manifest = json.loads((ROOT / "kimi.plugin.json").read_text(encoding="utf8"))
         hooks = {h.get("matcher"): h["command"] for h in manifest["hooks"] if h["event"] == "PreToolUse"}
@@ -588,6 +589,104 @@ class InternalAuditTests(unittest.TestCase):
             j.rows[-1]["event"]["turnId"] = event_id
             self.write(j)
             self.assertEqual(ia.check_ticket(ticket, "check", self.root, self.home, wait_seconds=0)["formal_status"], "UNVERIFIED")
+
+
+    def repair_payload(self, ticket, phase="check", call="bad-call", **changes):
+        literal = ia.audit_command(self.root, ticket, phase, self.home)
+        payload = {**self.payload, "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_call_id": call,
+                   "tool_input": {"command": literal + " 2>&1 || " + literal + " #PRIVATE_SHELL"}}
+        payload.update(changes)
+        return payload, literal
+
+    def test_own_wrapper_gets_one_literal_repair_then_real_check_executes(self):
+        ticket = self.issue()
+        original_ticket = ia.ticket_path(self.home, ticket).read_bytes()
+        payload, literal = self.repair_payload(ticket)
+        response = ia.bind_call(payload, self.root, self.home)
+        reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertEqual(response["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertTrue(reason.startswith("EJA_AUDIT_REPAIR:"))
+        self.assertEqual(reason.splitlines()[-1], literal)
+        receipt_path = ia.ticket_path(self.home, ticket).with_suffix(".check.repair.json")
+        receipt_bytes = receipt_path.read_bytes()
+        receipt = json.loads(receipt_bytes)
+        self.assertEqual(set(receipt), {"schema_version", "session_id", "tool_call_id", "phase", "reason"})
+        self.assertEqual(receipt["tool_call_id"], "bad-call")
+        self.assertNotIn("PRIVATE", receipt_bytes.decode("utf8"))
+        self.assertEqual(ia.bind_call(payload, self.root, self.home), response)
+        other, _ = self.repair_payload(ticket, call="second-bad")
+        reason2 = ia.bind_call(other, self.root, self.home)["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertNotIn(literal, reason2)
+        self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+        decision, command = self.bind(ticket)
+        self.assertEqual(decision, {})
+        self.pending(command)
+        report = ia.check_ticket(ticket, "check", self.root, self.home, wait_seconds=0)
+        self.assertEqual(report["formal_status"], "FAIL")  # The original missing verification is retained.
+        self.assertEqual(ia.ticket_path(self.home, ticket).read_bytes(), original_ticket)
+        self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+        self.assertNotEqual(self.bind(ticket)[0], {})
+
+    def test_audit_repair_never_guesses_foreign_or_ambiguous_identity(self):
+        for kind in ("session", "cwd", "home", "two-tickets", "two-phases", "missing-call"):
+            ticket = self.issue()
+            payload, literal = self.repair_payload(ticket)
+            if kind == "session":
+                payload["session_id"] = "foreign"
+            elif kind == "cwd":
+                payload["cwd"] = str(self.root / "foreign")
+            elif kind == "home":
+                payload["tool_input"]["command"] = literal.replace(self.home.as_posix(), (self.root / "elsewhere").as_posix()) + " 2>&1"
+            elif kind == "two-tickets":
+                payload["tool_input"]["command"] += " || " + ia.audit_command(self.root, self.issue(), "check", self.home)
+            elif kind == "two-phases":
+                payload["tool_input"]["command"] += " || " + ia.audit_command(self.root, ticket, "recheck", self.home)
+            else:
+                payload.pop("tool_call_id")
+            response = ia.bind_call(payload, self.root, self.home)
+            with self.subTest(kind=kind):
+                self.assertNotIn("EJA_AUDIT_REPAIR:", str(response))
+                self.assertFalse(ia.ticket_path(self.home, ticket).with_suffix(".check.repair.json").exists())
+
+    def test_expired_or_consumed_phase_never_gets_a_repair(self):
+        for kind in ("expired", "bound", "reported"):
+            ticket = self.issue()
+            payload, _ = self.repair_payload(ticket)
+            if kind == "bound":
+                self.assertEqual(self.bind(ticket)[0], {})
+            elif kind == "reported":
+                ia._write_new(ia.report_path(self.home, ticket, "check"), {"formal_status": "FAIL"})
+            if kind == "expired":
+                issued = json.loads(ia.ticket_path(self.home, ticket).read_text())["issued_at"]
+                with patch.object(ia.time, "time", return_value=issued + ia.TTL + 1):
+                    response = ia.bind_call(payload, self.root, self.home)
+            else:
+                response = ia.bind_call(payload, self.root, self.home)
+            with self.subTest(kind=kind):
+                self.assertNotIn("EJA_AUDIT_REPAIR:", str(response))
+                self.assertFalse(ia.ticket_path(self.home, ticket).with_suffix(".check.repair.json").exists())
+
+    def test_recheck_repair_requires_original_and_has_its_own_single_budget(self):
+        ticket = self.issue()
+        payload, literal = self.repair_payload(ticket, phase="recheck")
+        self.assertNotIn("EJA_AUDIT_REPAIR:", str(ia.bind_call(payload, self.root, self.home)))
+        _, check = self.bind(ticket)
+        self.pending(check)
+        ia.check_ticket(ticket, "check", self.root, self.home, wait_seconds=0)
+        response = ia.bind_call(payload, self.root, self.home)
+        self.assertEqual(response["hookSpecificOutput"]["permissionDecisionReason"].splitlines()[-1], literal)
+        self.assertTrue(ia.ticket_path(self.home, ticket).with_suffix(".recheck.repair.json").exists())
+        self.assertEqual(self.bind(ticket, "recheck", "recheck-call")[0], {})
+
+    def test_parallel_malformed_calls_cannot_create_more_than_one_repair(self):
+        ticket = self.issue()
+        payloads = [self.repair_payload(ticket, call="bad-" + str(n))[0] for n in range(16)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda p: ia.bind_call(p, self.root, self.home), payloads))
+        repairs = [r for r in results if "EJA_AUDIT_REPAIR:" in str(r)]
+        self.assertEqual(len(repairs), 1)
+        receipt = json.loads(ia.ticket_path(self.home, ticket).with_suffix(".check.repair.json").read_text())
+        self.assertIn(receipt["tool_call_id"], [p["tool_call_id"] for p in payloads])
 
 
 if __name__ == "__main__":

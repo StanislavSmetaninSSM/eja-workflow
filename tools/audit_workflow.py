@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 
-from delegation_contract import parse_packet, lexical_path
+from delegation_contract import parse_packet, lexical_path, implementation_intent
 from delegation_guard import verify_receipt
 
 
@@ -59,16 +59,13 @@ def canonical_turn_id(value):
 
 
 def _policy():
-    try:
-        return POLICY_PATH.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    from review_policy import policy_text
+    return policy_text()
 
 
 def _contains_policy(text):
-    policy = _policy()
-    stripped = re.sub(r"(?m)^\d+\t", "", text.replace("\r\n", "\n"))
-    return bool(policy and policy in stripped)
+    from review_policy import contains_policy
+    return contains_policy(text)
 
 
 @dataclass
@@ -86,6 +83,7 @@ class Trace:
     kernel_turn_id: int | None = None
     kernel_open: bool = False
     task_start_line: int = 0
+    first_return_line: int = 0
     assignment: dict | None = None
 
     @property
@@ -102,12 +100,17 @@ def _result_projection(result):
     skill = match.group(1) if match else None
     agent = re.match(r"\Aagent_id: (agent-[0-9]+)\nactual_subagent_type: ([\w-]+)\nstatus: (\w+)\n",
                      output.replace("\r\n", "\n"))
+    background = re.match(r"\Atask_id: [^\r\n]+\nstatus: running\nagent_id: agent-[0-9]+\n"
+                          r"actual_subagent_type: [\w-]+\nautomatic_notification: true(?:\n|\Z)",
+                          output.replace("\r\n", "\n"))
+    from review_policy import complete_policy_read
     return {"loaded_skill": skill if skill in KNOWN_SKILLS else None,
             "error": bool(result.get("isError") or result.get("error")),
             "agent_id": agent.group(1) if agent else None,
             "custom_role": agent.group(2) == "eja-methodology" if agent else False,
             "completed_agent": agent.group(3) == "completed" if agent else False,
-            "has_audit": _contains_policy(output)}
+            "agent_envelope": bool(background or (agent and agent.group(3) in {"completed", "failed"})),
+            "has_audit": _contains_policy(output), "policy_full": complete_policy_read(output)}
 
 
 def _valid_mcp_health(row):
@@ -116,10 +119,9 @@ def _valid_mcp_health(row):
     if kind not in ("mcp.server_failed", "mcp.server_failure_resolved"):
         return False
     required = {"type", "agentId", "serverName", "transport", "time"}
-    allowed = required | ({"error"} if kind == "mcp.server_failed" else {"resolution"})
     if kind == "mcp.server_failure_resolved":
         required = required | {"resolution"}
-    if not required <= row.keys() or row.keys() - allowed:
+    if not required <= row.keys():
         return False
     if not all(isinstance(row[key], str) for key in ("agentId", "serverName")):
         return False
@@ -174,7 +176,41 @@ def phase_evidence(trace, calls=None):
     def finding(rule, ok, refs):
         findings.append({"rule": rule, "status": "PASS" if ok else "FAIL" if trace.complete else "UNVERIFIED",
                          "evidence": [{"source": "provided/wire.jsonl", "line": n} for n in refs]})
+    if trace.assignment and trace.assignment["role"] == "implementation":
+        first_code = min((c["line"] for c in calls if c.get("code")), default=float("inf"))
+        first_return = trace.first_return_line or float("inf")
+        for label, skills, limit in (
+                ("execution", EXECUTION, min(first_code, first_return)),
+                ("tdd", {"superpowers:test-driven-development"}, min(first_code, first_return)),
+                ("bridge", {"spec-kit-superpowers-bridge"}, min(first_code, first_return)),
+                ("verification_before_return", {VERIFY}, first_return)):
+            receipts = []
+            for call in trace.calls:
+                result = trace.results.get(call["id"], {})
+                if (call["name"] == "Skill" and call["skill"] in skills
+                        and result.get("loaded_skill") == call["skill"] and not result.get("error", True)
+                        and call.get("uuid") and result.get("parent_uuid") == call["uuid"]
+                        and call.get("native_task") and result.get("native_task")
+                        and result["line"] < limit):
+                    receipts.append(result["line"])
+            rule = "assigned_implementation_" + label
+            if label == "verification_before_return" and not trace.first_return_line:
+                findings.append({"rule": rule, "status": "UNVERIFIED", "evidence": []})
+            else:
+                finding(rule, bool(receipts), receipts)
     if trace.assignment and trace.assignment["role"] == "review":
+        policy_reads = []
+        policy_path = trace.assignment["policy_path"]
+        for call in calls:
+            result = trace.results.get(call["id"], {})
+            if (call["name"] == "Read" and call.get("file_path") == policy_path
+                    and call.get("uuid") and result.get("parent_uuid") == call["uuid"]
+                    and call.get("native_task") and result.get("native_task")
+                    and result.get("policy_full") and not result.get("error", True)):
+                policy_reads.append(result["line"])
+        finding("review_policy_received", bool(policy_reads), policy_reads)
+        first_work = min((c["line"] for c in calls if c.get("review_work")), default=float("inf"))
+        finding("review_policy_before_work", any(n < first_work for n in policy_reads), policy_reads)
         if trace.assignment["result_delivery"] == "inline":
             findings.append({"rule": "review_inline_delivery", "status": "UNVERIFIED", "evidence": []})
         else:
@@ -256,6 +292,7 @@ def load_log(path):
                 continue
             if kind == "turn.prompt":
                 trace.task_start_line = number
+                trace.first_return_line = 0
                 trace.assignment = None
                 trace.has_prompt = True
                 trace.ended = False
@@ -269,10 +306,13 @@ def load_log(path):
                             and origin == {"kind": "system_trigger", "name": "subagent"}
                             and isinstance(inputs, list) and len(inputs) == 1
                             and isinstance(inputs[0], dict) and inputs[0].get("type") == "text"):
+                        if implementation_intent(inputs[0].get("text")):
+                            trace.assignment = {"role": "implementation"}
                         try:
                             packet = parse_packet(inputs[0].get("text"))
                             if packet["role"] == "review":
                                 trace.assignment = {"role": "review", "result_delivery": packet["result_delivery"],
+                                                    "policy_path": str(POLICY_PATH),
                                                     "result_artifact": str(lexical_path(packet["result_artifact"]))
                                                     if packet["result_delivery"] == "artifact" else None}
                         except ValueError:
@@ -315,6 +355,9 @@ def load_log(path):
                 continue
             if kind == "agent.turn.ended":
                 trace.ended = row.get("outcome") == "done"
+                if (trace.ended and trace.kernel_open and not trace.first_return_line
+                        and row.get("agentId", path.parent.name) == path.parent.name):
+                    trace.first_return_line = number
                 continue
             if kind != "context.append_loop_event":
                 if not isinstance(kind, str) or kind not in IGNORED_TYPES:
@@ -357,7 +400,7 @@ def load_log(path):
                 if name in ("Read", "Write", "Edit") and (not isinstance(file_path, str) or not file_path):
                     trace.issues.append("unsupported_file_path")
                 normalized_file = None
-                if name in ("Write", "Edit"):
+                if name in ("Read", "Write", "Edit"):
                     try:
                         normalized_file = str(lexical_path(file_path))
                     except (ValueError, TypeError):
@@ -387,16 +430,37 @@ def load_log(path):
                 own_audit = isinstance(command, str) and bool(re.fullmatch(
                     r'python -B -X utf8 "[^"\n]*[/\\]tools[/\\]internal_audit\.py" (?:check|recheck) '
                     r'--ticket [0-9a-f-]{36} --home "[^"\n]+"', command))
+                preparation_read = False
+                if name == "Read" and normalized_file:
+                    read_path = Path(normalized_file)
+                    parts = [p.lower() for p in read_path.parts]
+                    preparation_read = (read_path.name.lower() == "agents.md"
+                        or (read_path.suffix.lower() in {".md", ".json"}
+                            and read_path.is_relative_to(POLICY_PATH.parents[2]))
+                        or read_path in {POLICY_PATH.parents[3] / "system-prompt.md",
+                                         POLICY_PATH.parents[3] / "agents/eja-methodology.md"}
+                        or (read_path.name.lower() in {"spec.md", "plan.md", "tasks.md", "research.md",
+                                "data-model.md", "quickstart.md", "constitution.md"}
+                            and ("specs" in parts or ".specify" in parts)))
+                review_work = (name in ("Write", "Edit", "Grep", "Glob")
+                    or (name == "Read" and not preparation_read)
+                    or (name == "Bash" and not own_audit)
+                    or name.startswith(("mcp__serena__", "mcp__plugin-serena_serena__")))
+                serena_write = (name.startswith(("mcp__serena__", "mcp__plugin-serena_serena__"))
+                    and name.rsplit("__", 1)[-1] in {"replace_symbol_body", "insert_after_symbol", "insert_before_symbol",
+                        "rename_symbol", "safe_delete_symbol", "replace_content", "create_text_file"}
+                    and isinstance(file_path, str) and Path(file_path).suffix.lower() in CODE_SUFFIXES)
                 trace.calls.append({"id": cid, "line": number, "name": name,
                                     "native_task": native_task,
                                     "uuid": event.get("uuid") if isinstance(event.get("uuid"), str) else None,
                                     "file_path": normalized_file,
+                                    "review_work": review_work,
                                     "skill": skill if skill in KNOWN_SKILLS else None,
                                     "guide_read": name == "Read" and isinstance(file_path, str)
                                     and file_path.replace("\\", "/").endswith("references/child-agents.md"),
                                     "audit_read": name == "Read" and isinstance(file_path, str)
                                     and file_path.replace("\\", "/").endswith("references/contract-review.md"),
-                                    "packet_audit": (_contains_policy(packet.get("contract_review", "")) if packet
+                                    "packet_audit": ((bool(packet.get("contract_review_ref")) or _contains_policy(packet.get("contract_review", ""))) if packet
                                                      else _contains_policy(prompt)) if name == "Agent" else False,
                                     "packet_serena": bool(packet),
                                     "input_sha256": fingerprint,
@@ -407,8 +471,8 @@ def load_log(path):
                                     and Path(file_path).suffix.lower() in CODE_SUFFIXES,
                                     "symbol_path": symbol_path,
                                     "own_audit": own_audit,
-                                    "code": name in ("Write", "Edit") and isinstance(file_path, str)
-                                    and Path(file_path).suffix.lower() in CODE_SUFFIXES})
+                                    "code": serena_write or (name in ("Write", "Edit") and isinstance(file_path, str)
+                                    and Path(file_path).suffix.lower() in CODE_SUFFIXES)})
             else:
                 result = _result_projection(event.get("result"))
                 if cid not in seen or cid in trace.results or result is None:
@@ -425,15 +489,30 @@ def load_log(path):
                 if (call and call["name"] == "Skill" and call["skill"] in KNOWN_SKILLS
                         and not result["error"] and result["loaded_skill"] != call["skill"]):
                     trace.issues.append("unsupported_skill_result")
+                if call and call["name"] == "Agent" and not result["error"] and not result["agent_envelope"]:
+                    trace.issues.append("unsupported_agent_result")
                 trace.results[cid] = {**result, "line": number}
     if seen != set(trace.results):
         trace.issues.append("unmatched_calls")
     return trace
 
 
+def evidence_availability(trace):
+    """Classify adapter/evidence limits without guessing an application update."""
+    issues = set(trace.issues) - {"unmatched_calls"}
+    if issues & {"invalid_record", "oversized_record", "invalid_envelope", "invalid_call", "missing_call_id"}:
+        return "journal_invalid"
+    if issues:
+        return "unsupported_format"
+    if not trace.has_metadata or not trace.has_prompt:
+        return "journal_unavailable"
+    return None
+
+
 def audit(trace, role, child_root=None, review_agents=(), guard_home=None, guard_session=None):
     """Evaluate bounded formal rules, keeping semantic and shell coverage explicit."""
     findings = []
+    child_unavailable = False
 
     def finding(rule, passed, refs=()):
         status = "PASS" if passed else "FAIL" if trace.complete else "UNVERIFIED"
@@ -514,12 +593,14 @@ def audit(trace, role, child_root=None, review_agents=(), guard_home=None, guard
                         or child_path.resolve().parent.name != aid):
                     raise ValueError("child scope")
                 child_report = audit(load_log(child_path), "reviewer")
+                child_unavailable = child_unavailable or bool(child_report.get("audit_availability"))
                 for child_finding in child_report["findings"]:
                     projected = {**child_finding, "rule": prefix + child_finding["rule"],
                                  "evidence": [{**ref, "source": aid + "/wire.jsonl"}
                                               for ref in child_finding["evidence"]]}
                     findings.append(projected)
             except (OSError, ValueError):
+                child_unavailable = True
                 findings.append({"rule": prefix + "entry_first", "status": "UNVERIFIED", "evidence": []})
             if role == "delegator" or aid in review_agents:
                 request = loaded("superpowers:requesting-code-review", call["line"])
@@ -545,13 +626,18 @@ def audit(trace, role, child_root=None, review_agents=(), guard_home=None, guard
             findings.append({"rule": "swarm_coverage", "status": "UNVERIFIED", "evidence": []})
     statuses = {f["status"] for f in findings}
     status = "FAIL" if "FAIL" in statuses else "UNVERIFIED" if "UNVERIFIED" in statuses else "PASS"
-    return {"schema_version": 1, "role": role, "formal_status": status,
+    report = {"schema_version": 1, "role": role, "formal_status": status,
             "workflow_status": "NOT_PROVEN", "findings": findings,
             "manual_coverage": ["consent_semantics", "code_correctness", "shell_and_other_mutations",
                                 "natural_language_handoffs", "decision_table_meaning_and_order",
                                 "native_spec_kit_artifact_steps", "tdd_red_green", "child_applicable_phases",
                                 "source_authenticity_and_history_completeness",
                                 "review_report_completeness_parent_full_read_and_final_delivery"]}
+    unavailable = evidence_availability(trace) or ("child_evidence_unavailable" if child_unavailable else None)
+    if unavailable:
+        report["audit_availability"] = {"status": "UNAVAILABLE", "reason": unavailable}
+        report["formal_status"] = "UNVERIFIED"
+    return report
 
 
 def _unverified(role, rule):

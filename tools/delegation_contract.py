@@ -2,6 +2,7 @@
 import json
 import math
 from pathlib import Path
+from review_policy import valid_policy_reference
 
 MAX_PROMPT_BYTES = 1024 * 1024
 MAX_ENVELOPE_BYTES = 64 * 1024
@@ -92,8 +93,8 @@ def _review_delivery(packet):
         raise ValueError("review result delivery required")
 
 
-def parse_packet(prompt: str) -> dict:
-    """Return a validated v1 envelope, or raise ValueError for structural failure."""
+def _envelope(prompt):
+    """Decode only the bounded versioned envelope; this establishes no readiness."""
     try:
         _text(prompt)
         if len(prompt.encode("utf8")) > MAX_PROMPT_BYTES:
@@ -110,6 +111,23 @@ def parse_packet(prompt: str) -> dict:
         packet = strict_json(raw)
         if not isinstance(packet, dict) or type(packet.get("schema_version")) is not int or packet["schema_version"] != 1:
             raise ValueError("unsupported handoff version")
+        return packet
+    except (TypeError, KeyError, UnicodeError, RecursionError) as error:
+        raise ValueError("invalid handoff") from error
+
+
+def implementation_intent(prompt):
+    """Recognize declared intent even when readiness fields omit required phases."""
+    try:
+        return _envelope(prompt).get("role") == "implementation"
+    except ValueError:
+        return False
+
+
+def parse_packet(prompt: str) -> dict:
+    """Return a validated v1 envelope, or raise ValueError for structural failure."""
+    try:
+        packet = _envelope(prompt)
         role = packet.get("role")
         if role not in ("implementation", "review", "investigation"):
             raise ValueError("unsupported handoff role")
@@ -141,7 +159,11 @@ def parse_packet(prompt: str) -> dict:
         _texts(serena.get("languages"))
         _text(serena.get("evidence"))
         if role == "review":
-            _text(packet.get("contract_review"))
+            if "contract_review_ref" in packet:
+                if "contract_review" in packet or not valid_policy_reference(packet["contract_review_ref"]):
+                    raise ValueError("exact current review policy reference required")
+            else:
+                _text(packet.get("contract_review"))
         return packet
     except (TypeError, KeyError, UnicodeError, RecursionError) as error:
         raise ValueError("invalid handoff") from error

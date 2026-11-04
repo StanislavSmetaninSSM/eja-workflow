@@ -133,6 +133,10 @@ class ReviewDeliveryTests(unittest.TestCase):
                                      artifact_unavailable_reason="user_forbids_writes"))
         for skill in (aw.ENTRY, aw.USING, aw.VERIFY):
             j.skill(skill)
+        j.call("Read", {"path": str(aw.POLICY_PATH)}, aw.POLICY_PATH.read_text(encoding="utf8"))
+        j.rows[-2]["agentId"] = j.rows[-1]["agentId"] = "agent-7"
+        j.rows[-2]["event"].update(uuid="policy-read", turnId="0")
+        j.rows[-1]["event"]["parentUuid"] = "policy-read"
         j.call("Bash", {"command": "inspect permitted input"})
         j.event({"type": "tool.call", "name": "Bash", "args": {"command": "pending audit"}, "toolCallId": "pending"})
         self.wire.write_text("".join(json.dumps(r) + "\n" for r in j.rows), encoding="utf8")
