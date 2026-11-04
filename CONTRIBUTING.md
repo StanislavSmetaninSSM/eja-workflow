@@ -13,7 +13,7 @@ python -B tools/sync_profile_policy.py --check
 python -B -m unittest discover -s tests -v
 ```
 
-Проверьте пакет актуальным штатным Plugin Builder в Kimi Work. Зелёные тесты не подтверждают соблюдение методологии моделью; существенные ограничения описывайте честно. Сохраните UNLICENSED, если владелец отдельно не согласовал лицензию.
+Проверьте пакет актуальным штатным Plugin Builder в Kimi Work. Зелёные тесты не подтверждают соблюдение методологии моделью; существенные ограничения описывайте честно. Проект распространяется по MIT: сохраняйте уведомление об авторстве и текст лицензии в копиях или существенных частях кода.
 
 ## English
 
@@ -28,4 +28,4 @@ python -B tools/sync_profile_policy.py --check
 python -B -m unittest discover -s tests -v
 ```
 
-Validate the package with Kimi Work's current built-in Plugin Builder. Passing tests do not establish actual model compliance; report material limitations accurately. Preserve UNLICENSED unless the owner separately chooses a license.
+Validate the package with Kimi Work's current built-in Plugin Builder. Passing tests do not establish actual model compliance; report material limitations accurately. This project is MIT-licensed: retain the copyright and license notice in copies or substantial portions of the software.
