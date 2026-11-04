@@ -1,8 +1,8 @@
 {
   "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
   "name": "eja-workflow",
-  "version": "0.9.1",
-  "description": "Обязательная методология рабочих задач Kimi Work и установка недостающих компонентов.",
+  "version": "0.12.3",
+  "description": "Task methodology for Kimi Work: Superpowers, Spec Kit, Serena and independent review.",
   "keywords": [
     "workflow",
     "superpowers",
@@ -14,32 +14,56 @@
   "skillInstructions": "Применяй этот скилл в Kimi Work с фактически доступными инструментами. Точные правила пользователя и согласованный объём выше общих рекомендаций. Не загружай стартовый скилл рекурсивно.",
   "interface": {
     "displayName": "Eja Workflow",
-    "shortDescription": "Методология задач: Superpowers, Spec Kit, мост и Serena.",
-    "longDescription": "Стартовый скилл, контроль этапов и дочерний профиль eja-methodology с передачей согласованного контракта. Ссылки для установки зависимостей и локальный аудитор наблюдаемых действий. Автоматические хуки отключены: в проверенной версии Kimi Work UserPromptSubmit изменяет видимый текст пользовательского сообщения. Вызов скилла и соблюдение методологии проверяются отдельно; автоматическое принуждение не заявляется.",
+    "shortDescription": "From agreed requirements to implementation and independent review.",
+    "longDescription": "A Kimi Work desktop plugin connecting Superpowers, Spec Kit, their bridge and Serena. Includes an entry skill, phase checkpoints, a child-agent profile and a bounded internal auditor. Dependencies are separate. Ordinary replies focus on task results; no service text is inserted into user messages. Automatic methodology compliance is not guaranteed. Tested on Windows.",
     "developerName": "Eja",
     "websiteURL": "https://github.com/StanislavSmetaninSSM/eja-workflow",
     "iconUrl": "",
     "category": "PRODUCTIVITY",
     "defaultLocale": "en-US",
     "tryPrompts": [
-      "Продолжи текущую feature по её tasks.md",
-      "Добавь небольшую функцию с проверкой результата"
+      "Discuss an idea and clarify requirements before coding",
+      "Continue the active feature using its tasks.md"
     ],
     "skillOverrides": {
       "eja-workflow": {
         "displayName": "Eja Workflow",
-        "description": "Обязательный первый вызов инструмента для рабочих задач — до осмотра файлов, команд, исправлений, brainstorming, планирования и тестов. Малые и заранее одобренные задачи не исключение."
+        "description": "MANDATORY first tool call for work tasks, before file inspection, commands, fixes, brainstorming, planning or tests. Small and previously approved tasks are included."
       },
       "workflow-checkpoint": {
-        "displayName": "Контроль этапа",
-        "description": "Обязателен при начале brainstorming и планирования, перед записью кода или тестов и после независимого ревью."
+        "displayName": "Workflow checkpoint",
+        "description": "MANDATORY at brainstorming and planning entry, before writing code or tests, and after independent review."
       }
-    }
+    },
+    "locales": "./locales/"
   },
   "skills": "./skills/",
   "agents": [
     "./agents/"
   ],
-  "systemPromptPath": "./system-prompt.md",
-  "hooks": []
+  "hooks": [
+    {
+      "event": "Stop",
+      "command": "python -B -X utf8 \"%KIMI_PLUGIN_ROOT%\\tools\\internal_audit.py\" stop",
+      "timeout": 10
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "command": "python -B -X utf8 \"%KIMI_PLUGIN_ROOT%\\tools\\internal_audit.py\" pretool",
+      "timeout": 10
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Agent",
+      "command": "python -B -X utf8 \"%KIMI_PLUGIN_ROOT%\\tools\\delegation_guard.py\" pretool",
+      "timeout": 10
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "AgentSwarm",
+      "command": "python -B -X utf8 \"%KIMI_PLUGIN_ROOT%\\tools\\delegation_guard.py\" pretool",
+      "timeout": 10
+    }
+  ]
 }
