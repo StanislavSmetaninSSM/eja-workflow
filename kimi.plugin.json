@@ -1,7 +1,7 @@
 {
   "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
   "name": "eja-workflow",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Обязательная методология рабочих задач Kimi Work и установка недостающих компонентов.",
   "keywords": [
     "workflow",
