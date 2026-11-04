@@ -1,0 +1,20 @@
+{
+  "displayName": "Eja Workflow",
+  "shortDescription": "从已确认的需求到实现、验证和独立评审。",
+  "longDescription": "适用于 Kimi Work 桌面版的工作流程插件，连接 Superpowers、Spec Kit、桥接技能和 Serena。包含入口技能、阶段检查点、子代理配置和有限的内部审计。依赖项需单独安装。常规回复关注任务结果，不向用户消息插入服务文本。不保证自动遵循全部方法。已在 Windows 上验证。",
+  "developerName": "Eja",
+  "tryPrompts": [
+    "先讨论想法并澄清需求，再开始编写代码",
+    "按照当前功能的 tasks.md 继续工作"
+  ],
+  "skillOverrides": {
+    "eja-workflow": {
+      "displayName": "Eja Workflow",
+      "description": "工作任务必须首先调用此技能，然后才能检查文件、执行命令、修复、头脑风暴、规划或测试。小任务和已批准的任务也适用。"
+    },
+    "workflow-checkpoint": {
+      "displayName": "工作流程检查点",
+      "description": "开始头脑风暴或规划时、编写代码或测试前，以及独立评审后必须调用。"
+    }
+  }
+}

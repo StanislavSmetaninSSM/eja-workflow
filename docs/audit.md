@@ -36,7 +36,7 @@ The tool correlates actual call/result ids, does not credit failed or late loads
 
 Manual coverage remains explicit: human approval and contract meaning, code correctness, native Spec Kit script/artifact steps, actual TDD RED/GREEN, natural-language checkpoints, decision-table content/order, role applicability and child phase assignments, journal authenticity/completeness, and mutations through Bash or other channels. The command does not certify write isolation or all phase transitions. Unknown protocol/record forms, missing children, partial records and unfinished sessions cannot establish full success.
 
-The root entry skill does not automatically invoke this standalone completion auditor. A human or independent supervising process runs it and evaluates the report. The local 0.10.2 candidate separately tests a native [pre-completion Stop audit](internal-audit.md); it does not force model compliance or make this standalone command an autostart service.
+The root entry skill does not automatically invoke this standalone completion auditor. A human or independent supervising process runs it and evaluates the report. Release0.12.3 separately includes the bounded native [pre-completion Stop audit](internal-audit.md); it does not force model compliance or make this standalone command an autostart service.
 
 Run synthetic tests without live user journals:
 
