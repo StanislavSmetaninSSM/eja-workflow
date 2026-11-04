@@ -28,7 +28,7 @@
 
 ### Проверено и ограничения
 
-Версия **0.12.3** добавляет описание и настройки публикации поверх поведения 0.12.2. Проверенная среда: **Windows, Kimi Work 3.2.24.27**. Команды хуков используют Windows-синтаксис; поддержка других ОС не заявлена.
+Версия **0.12.4** добавляет лицензию MIT к выпуску 0.12.3; поведение плагина остаётся на уровне 0.12.2. Проверенная среда: **Windows, Kimi Work 3.2.24.27**. Команды хуков используют Windows-синтаксис; поддержка других ОС не заявлена.
 
 В живых проверках работали внутренний аудит, профиль дочернего агента, передача отчёта и два параллельных вызова <code>Agent</code> при включённом в интерфейсе Swarm. Отдельный пакетный API <code>AgentSwarm</code> не прошёл живую проверку. Это подтверждает отдельные механизмы, а не строгое соблюдение всех этапов: наблюдались пропуски скиллов и методологические ошибки. Процент успешности не установлен; гарантии 80% или 100% нет.
 
@@ -44,7 +44,7 @@
 
 Изменения в <code>main</code> принимаются через PR с одобрением владельца **@StanislavSmetaninSSM** для всех файлов. Владелец может обходить это правило для собственных изменений. См. [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Статус лицензии: **UNLICENSED**. Лицензия на использование и распространение кода пока не выбрана; публичность репозитория не меняет этот статус. Личные журналы тестов, состояние приложения, ключи и локальные резервные копии в пакет не входят.
+Лицензия: **[MIT](LICENSE)**. Автор: StanislavSmetaninSSM (Eja), 2026. Разрешены использование, изменение и распространение, включая коммерческое, при сохранении уведомления об авторстве и текста лицензии. ПО предоставляется без гарантий. Правила PR относятся к этому репозиторию и не ограничивают отдельные форки в рамках MIT. Отдельно устанавливаемые зависимости сохраняют собственные лицензии. Личные журналы тестов, состояние приложения, ключи и локальные резервные копии в пакет не входят.
 
 ---
 
@@ -72,7 +72,7 @@ The plugin contains an entry skill, phase checkpoints, the <code>eja-methodology
 
 ### Tested behavior and limits
 
-Version **0.12.3** adds publication documentation and metadata to the behavior of 0.12.2. The tested environment is **Windows, Kimi Work 3.2.24.27**. Hook commands use Windows syntax; other operating systems are not claimed as supported.
+Version **0.12.4** adds the MIT license to release 0.12.3; plugin behavior remains unchanged from 0.12.2. The tested environment is **Windows, Kimi Work 3.2.24.27**. Hook commands use Windows syntax; other operating systems are not claimed as supported.
 
 Live checks exercised internal audits, the child profile, full report delivery and two concurrent <code>Agent</code> calls with UI Swarm enabled. The separate batch <code>AgentSwarm</code> API has not been live-validated. These establish individual mechanisms, not strict end-to-end methodology compliance: skipped skills and workflow failures were observed. No success percentage has been established; neither 80% nor 100% is guaranteed.
 
@@ -88,4 +88,4 @@ Technical details: [internal audit](docs/internal-audit.md), [standalone auditor
 
 Changes to <code>main</code> require a PR approved by owner **@StanislavSmetaninSSM** for all files. The owner may bypass this rule for their own changes. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-License status: **UNLICENSED**. A license for use and redistribution has not been selected; making this repository public does not change that status. Private test journals, application state, credentials and local backups are excluded from the package.
+License: **[MIT](LICENSE)**. Copyright 2026 StanislavSmetaninSSM (Eja). Use, modification and redistribution, including commercial use, are permitted while retaining the copyright and license notice. The software is provided without warranty. PR rules govern this repository and do not restrict separate forks under MIT. Separately installed dependencies retain their own licenses. Private test journals, application state, credentials and local backups are excluded from the package.

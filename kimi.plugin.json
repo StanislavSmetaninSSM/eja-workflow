@@ -1,7 +1,7 @@
 {
   "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
   "name": "eja-workflow",
-  "version": "0.12.3",
+  "version": "0.12.4",
   "description": "Task methodology for Kimi Work: Superpowers, Spec Kit, Serena and independent review.",
   "keywords": [
     "workflow",
@@ -10,7 +10,7 @@
     "serena"
   ],
   "author": "Eja",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "skillInstructions": "Применяй этот скилл в Kimi Work с фактически доступными инструментами. Точные правила пользователя и согласованный объём выше общих рекомендаций. Не загружай стартовый скилл рекурсивно.",
   "interface": {
     "displayName": "Eja Workflow",
