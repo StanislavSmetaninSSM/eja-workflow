@@ -28,7 +28,7 @@
 
 ### Проверено и ограничения
 
-Версия **0.12.4** добавляет лицензию MIT к выпуску 0.12.3; поведение плагина остаётся на уровне 0.12.2. Проверенная среда: **Windows, Kimi Work 3.2.24.27**. Команды хуков используют Windows-синтаксис; поддержка других ОС не заявлена.
+Версия **0.12.5** исправляет рецепт установки Serena: проверенный новый маршрут 2.1.0, доступный manual, явные предпосылки и ограниченные повторы. Рецепт сначала обнаруживает и повторно использует работающую установку Serena; автоматическая миграция не предусмотрена. [Проверка в чистом профиле Windows](docs/serena-clean-install.md) описывает фактические результаты и границы. Код аудитора и хуков сохранён с 0.12.2; лицензия MIT. Проверенная среда: **Windows, Kimi Work 3.2.24.27**. Команды хуков используют Windows-синтаксис; поддержка других ОС не заявлена.
 
 В живых проверках работали внутренний аудит, профиль дочернего агента, передача отчёта и два параллельных вызова <code>Agent</code> при включённом в интерфейсе Swarm. Отдельный пакетный API <code>AgentSwarm</code> не прошёл живую проверку. Это подтверждает отдельные механизмы, а не строгое соблюдение всех этапов: наблюдались пропуски скиллов и методологические ошибки. Процент успешности не установлен; гарантии 80% или 100% нет.
 
@@ -72,7 +72,7 @@ The plugin contains an entry skill, phase checkpoints, the <code>eja-methodology
 
 ### Tested behavior and limits
 
-Version **0.12.4** adds the MIT license to release 0.12.3; plugin behavior remains unchanged from 0.12.2. The tested environment is **Windows, Kimi Work 3.2.24.27**. Hook commands use Windows syntax; other operating systems are not claimed as supported.
+Version **0.12.5** corrects the Serena installation recipe: a tested fresh 2.1.0 path, available manual, explicit prerequisites and bounded retries. The recipe first discovers and reuses a working Serena installation; it does not request automatic migration. [Clean Windows profile validation](docs/serena-clean-install.md) records actual results and limits. Auditor and hook code is unchanged from 0.12.2; the license is MIT. The tested environment is **Windows, Kimi Work 3.2.24.27**. Hook commands use Windows syntax; other operating systems are not claimed as supported.
 
 Live checks exercised internal audits, the child profile, full report delivery and two concurrent <code>Agent</code> calls with UI Swarm enabled. The separate batch <code>AgentSwarm</code> API has not been live-validated. These establish individual mechanisms, not strict end-to-end methodology compliance: skipped skills and workflow failures were observed. No success percentage has been established; neither 80% nor 100% is guaranteed.
 
